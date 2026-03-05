@@ -10,7 +10,7 @@ from alembic import context
 
 from src.core import settings
 from src.db import Base
-
+from src.modules import User
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
