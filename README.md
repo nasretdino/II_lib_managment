@@ -209,7 +209,7 @@ location /chat/stream {
         │   ├── routers.py       # CRUD /users
         │   └── dependencies.py  # DI
         │
-        ├── documents/           # Загрузка и обработка документов
+        ├── documents/           # ✅ Готов — Загрузка и обработка документов
         │   ├── models.py        # Таблица documents
         │   ├── schemas.py       # DocumentUpload, DocumentRead
         │   ├── dao.py           # DocumentDAO
@@ -345,25 +345,31 @@ accesslog = "-"
 #### `.env.example`
 
 ```env
+# dev | stage | prod
 ENV=dev
 
+# Для Docker Compose: DB__HOST=db
+# Для локальной разработки: DB__HOST=localhost
 DB__HOST=db
 DB__PORT=5432
 DB__USER=postgres
-DB__PASSWORD=changeme
-DB__NAME=ii_lib
-DB__ECHO=false
+DB__PASSWORD=postgres
+DB__NAME=lib_management
+
+# Опционально. Если не задано, echo=True в dev, echo=False в prod/stage.
+# DB__ECHO=true
 DB__POOL_SIZE=20
 DB__MAX_OVERFLOW=10
+DB__POOL_RECYCLE=1800
 
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-
-LLM__ANALYST_MODEL=gpt-4o
-LLM__CRITIC_MODEL=claude-sonnet-4-20250514
-LLM__EMBEDDING_MODEL=text-embedding-3-small
-LLM__EMBEDDING_DIM=1536
-LLM__MAX_ARCADE_ITERATIONS=3
+# Планируется:
+# OPENAI_API_KEY=sk-...
+# ANTHROPIC_API_KEY=sk-ant-...
+# LLM__ANALYST_MODEL=gpt-4o
+# LLM__CRITIC_MODEL=claude-sonnet-4-20250514
+# LLM__EMBEDDING_MODEL=text-embedding-3-small
+# LLM__EMBEDDING_DIM=1536
+# LLM__MAX_ARCADE_ITERATIONS=3
 ```
 
 ---
@@ -381,7 +387,7 @@ class DatabaseSettings(BaseModel):
     user: str
     password: SecretStr
     name: str
-    echo: bool = False
+    echo: bool | None = None      # None → авто (True для dev, False для prod)
     pool_size: int = 20
     max_overflow: int = 10
     pool_recycle: int = 1800
@@ -391,23 +397,25 @@ class DatabaseSettings(BaseModel):
         # postgresql+asyncpg://user:pass@host:port/dbname
         ...
 
-class LLMSettings(BaseModel):
-    analyst_model: str = "gpt-4o"
-    critic_model: str = "claude-sonnet-4-20250514"
-    embedding_model: str = "text-embedding-3-small"
-    embedding_dim: int = 1536
-    max_arcade_iterations: int = 3
-
 class AppSettings(BaseSettings):
     env: Literal["dev", "stage", "prod"] = "prod"
     db: DatabaseSettings
-    llm: LLMSettings
-    openai_api_key: SecretStr
-    anthropic_api_key: SecretStr
+
+    @computed_field
+    def db_echo(self) -> bool:
+        """SQL echo: явное значение из DB__ECHO или автоматически True для dev."""
+        if self.db.echo is not None:
+            return self.db.echo
+        return self.env == "dev"
+
+    # Планируется:
+    # llm: LLMSettings
+    # openai_api_key: SecretStr
+    # anthropic_api_key: SecretStr
 ```
 
 - Вложенная структура через `env_nested_delimiter="__"` — переменная `DB__HOST` маппится в `settings.db.host`.
-- LLM-ключи хранятся как `SecretStr`, чтобы не утечь в логи.
+- `db_echo` — если `DB__ECHO` не задан в `.env`, SQL-логирование автоматически включается в dev и выключается в prod.
 
 #### `src/core/exceptions.py`
 
@@ -526,7 +534,7 @@ FastAPI Depends: создаёт `UserService(UserDAO(session))`.
 
 ### `src/modules/documents` — Документы
 
-Загрузка небольших файлов, извлечение текста, разбиение на чанки.
+Уже реализован. Загрузка небольших файлов, извлечение текста, разбиение на чанки.
 
 #### `documents/models.py`
 
@@ -989,10 +997,10 @@ async def get_messages(session_id: int, ...): ...
 
 | Метод | Путь | Описание | Статус |
 |---|---|---|---|
-| `POST` | `/documents/upload` | Загрузить файл (PDF/TXT/DOCX) | ⬜ |
-| `GET` | `/documents/` | Список документов пользователя | ⬜ |
-| `GET` | `/documents/{id}` | Метаданные документа | ⬜ |
-| `DELETE` | `/documents/{id}` | Удалить документ | ⬜ |
+| `POST` | `/documents/upload` | Загрузить файл (PDF/TXT/DOCX) | ✅ Готов |
+| `GET` | `/documents/` | Список документов пользователя | ✅ Готов |
+| `GET` | `/documents/{id}` | Метаданные документа | ✅ Готов |
+| `DELETE` | `/documents/{id}` | Удалить документ | ✅ Готов |
 
 ### Chat
 
@@ -1009,52 +1017,70 @@ async def get_messages(session_id: int, ...): ...
 | Переменная | Описание | Пример |
 |---|---|---|
 | `ENV` | Окружение | `dev` / `prod` |
-| `DB__HOST` | Хост PostgreSQL | `db` |
+| `DB__HOST` | Хост PostgreSQL (`db` для Docker, `localhost` для локальной разработки) | `db` |
 | `DB__PORT` | Порт PostgreSQL | `5432` |
 | `DB__USER` | Пользователь БД | `postgres` |
-| `DB__PASSWORD` | Пароль БД | `changeme` |
-| `DB__NAME` | Имя базы данных | `ii_lib` |
-| `DB__ECHO` | SQL-логирование | `false` |
+| `DB__PASSWORD` | Пароль БД | `postgres` |
+| `DB__NAME` | Имя базы данных | `lib_management` |
+| `DB__ECHO` | SQL-логирование (опционально; если не задан — `true` в dev, `false` в prod) | — |
 | `DB__POOL_SIZE` | Размер пула соединений | `20` |
 | `DB__MAX_OVERFLOW` | Макс. дополнительных соединений | `10` |
-| `OPENAI_API_KEY` | Ключ OpenAI API | `sk-...` |
-| `ANTHROPIC_API_KEY` | Ключ Anthropic API | `sk-ant-...` |
-| `LLM__ANALYST_MODEL` | Модель для Analyst | `gpt-4o` |
-| `LLM__CRITIC_MODEL` | Модель для Critic | `claude-sonnet-4-20250514` |
-| `LLM__EMBEDDING_MODEL` | Модель для эмбеддингов | `text-embedding-3-small` |
-| `LLM__EMBEDDING_DIM` | Размерность вектора | `1536` |
-| `LLM__MAX_ARCADE_ITERATIONS` | Макс. итераций ARCADE | `3` |
+| `DB__POOL_RECYCLE` | Время жизни соединения (сек) | `1800` |
+| `OPENAI_API_KEY` | ⬜ Ключ OpenAI API | `sk-...` |
+| `ANTHROPIC_API_KEY` | ⬜ Ключ Anthropic API | `sk-ant-...` |
+| `LLM__ANALYST_MODEL` | ⬜ Модель для Analyst | `gpt-4o` |
+| `LLM__CRITIC_MODEL` | ⬜ Модель для Critic | `claude-sonnet-4-20250514` |
+| `LLM__EMBEDDING_MODEL` | ⬜ Модель для эмбеддингов | `text-embedding-3-small` |
+| `LLM__EMBEDDING_DIM` | ⬜ Размерность вектора | `1536` |
+| `LLM__MAX_ARCADE_ITERATIONS` | ⬜ Макс. итераций ARCADE | `3` |
 
 ---
 
 ## Запуск
 
-```bash
-# 1. Клонировать репозиторий
-git clone <repo-url> && cd II_lib_managment
+### Dev (локальная разработка)
 
-# 2. Скопировать и заполнить .env
+```bash
+# 1. Скопировать шаблон переменных
 cp .env.example .env
-# Заполнить ключи API и параметры БД
 
-# 3. Запустить всё одной командой
-docker-compose up --build -d
+# 2. Выставить для локальной разработки:
+#    ENV=dev
+#    DB__HOST=localhost    (← важно! не "db")
 
-# Приложение доступно на http://localhost
-```
+# 3. Поднять только БД в Docker
+docker compose up db -d
 
-### Локальная разработка (без Docker)
-
-```bash
-# Установить зависимости
-poetry install
-
-# Запустить PostgreSQL с pgvector локально
-# ...
-
-# Применить миграции
+# 4. Прогнать миграции
 poetry run alembic upgrade head
 
-# Запустить dev-сервер
+# 5. Запустить сервер
 poetry run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+
+# 6. Тесты (БД не нужна — тесты используют SQLite in-memory)
+poetry run pytest tests/
 ```
+
+В dev-режиме (`ENV=dev`):
+
+- `debug=True` в FastAPI
+- `/docs` и `/redoc` доступны
+- SQL-запросы логируются (`db_echo=True`)
+- Loguru на уровне `DEBUG`
+
+### Prod (Docker Compose)
+
+```bash
+# 1. Настроить .env:
+#    ENV=prod
+#    DB__HOST=db           (← имя сервиса в docker-compose)
+#    DB__PASSWORD=<надёжный пароль>
+
+# 2. Запустить всё
+docker compose up -d --build
+```
+
+Docker Compose поднимет:
+- **db** — PostgreSQL 17
+- **migrate** — однократный запуск `alembic upgrade head`
+- **app** — FastAPI через Uvicorn

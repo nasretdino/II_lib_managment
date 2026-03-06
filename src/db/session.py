@@ -7,7 +7,7 @@ from src.core import settings
 
 engine = create_async_engine(
     settings.db.url,
-    echo=settings.db.echo,
+    echo=settings.db_echo,
     pool_size=settings.db.pool_size,
     max_overflow=settings.db.max_overflow,
     pool_recycle=settings.db.pool_recycle,

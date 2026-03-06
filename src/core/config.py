@@ -11,7 +11,7 @@ class DatabaseSettings(BaseModel):
     password: SecretStr
     name: str
 
-    echo: bool = False
+    echo: bool | None = None
     pool_size: int = 20
     max_overflow: int = 10
     pool_recycle: int = 1800
@@ -39,6 +39,14 @@ class AppSettings(BaseSettings):
 
     env: Literal["dev", "stage", "prod"] = "prod"
     db: DatabaseSettings
+
+    @computed_field
+    @property
+    def db_echo(self) -> bool:
+        """SQL echo: явное значение из DB__ECHO или автоматически True для dev."""
+        if self.db.echo is not None:
+            return self.db.echo
+        return self.env == "dev"
 
 
 settings = AppSettings()

@@ -1,6 +1,8 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Path, Query, status
+
+from src.core.exceptions import NotFoundError
 
 from .dependencies import get_user_service
 from .schemas import UserCreate, UserFilter, UserRead, UserUpdate
@@ -22,14 +24,12 @@ async def get_users(
 
 @router.get("/{user_id}", response_model=UserRead)
 async def get_user(
-    user_id: int,
+    user_id: Annotated[int, Path(gt=0)],
     service: Annotated[UserService, Depends(get_user_service)],
 ):
     user = await service.get_by_id(user_id)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found")
     return user
 
 
@@ -43,25 +43,21 @@ async def create_user(
 
 @router.patch("/{user_id}", response_model=UserRead)
 async def update_user(
-    user_id: int,
+    user_id: Annotated[int, Path(gt=0)],
     data: UserUpdate,
     service: Annotated[UserService, Depends(get_user_service)],
 ):
     user = await service.update(user_id, data)
     if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found")
     return user
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
-    user_id: int,
+    user_id: Annotated[int, Path(gt=0)],
     service: Annotated[UserService, Depends(get_user_service)],
 ):
     deleted = await service.delete(user_id)
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
+        raise NotFoundError("User not found")
