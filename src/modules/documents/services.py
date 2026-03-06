@@ -6,6 +6,7 @@ from fastapi import UploadFile
 from loguru import logger
 
 from src.core.exceptions import DocumentParsingError
+from src.modules.rag.services import RagService
 
 from .chunking import split_into_chunks
 from .dao import DocumentDAO
@@ -16,8 +17,9 @@ UPLOAD_DIR = Path("uploads")
 
 
 class DocumentService:
-    def __init__(self, dao: DocumentDAO):
+    def __init__(self, dao: DocumentDAO, rag_service: RagService | None = None):
         self.dao = dao
+        self.rag = rag_service
 
     async def upload(self, user_id: int, file: UploadFile) -> Document:
         """
@@ -68,8 +70,14 @@ class DocumentService:
                 "Document {} split into {} chunks", doc.filename, len(chunks)
             )
 
-            # 5. TODO: передать чанки в RagService для индексации
-            # await rag_service.index_document(doc.id, chunks)
+            # 5. Передать чанки в RagService для индексации через LightRAG
+            if self.rag is not None:
+                await self.rag.index_document(
+                    doc_id=doc.id,
+                    chunks=chunks,
+                    file_path=str(file_path),
+                )
+                logger.info("Document {} indexed in RAG", doc.filename)
 
             # 6. Обновить статус
             await self.dao.update_status(doc.id, "ready")
@@ -104,6 +112,13 @@ class DocumentService:
         doc = await self.dao.find_one_or_none_by_id(doc_id)
         if doc is None:
             return False
+
+        # Удалить из RAG-индекса
+        if self.rag is not None:
+            try:
+                await self.rag.delete_document(doc_id)
+            except Exception:
+                logger.warning("Failed to delete doc {} from RAG index", doc_id)
 
         # Удалить файл с диска
         path = Path(doc.file_path)

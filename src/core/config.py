@@ -29,6 +29,19 @@ class DatabaseSettings(BaseModel):
         ).unicode_string()
 
 
+class LLMSettings(BaseModel):
+    """Настройки LLM-провайдера (Gemini)."""
+
+    gemini_api_key: SecretStr
+    model_name: str = "gemini-2.5-flash"
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dim: int = 768
+    max_token_size: int = 8192
+    chunk_token_size: int = 1200
+    chunk_overlap_token_size: int = 100
+    workspace: str = "default"
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -39,6 +52,7 @@ class AppSettings(BaseSettings):
 
     env: Literal["dev", "stage", "prod"] = "prod"
     db: DatabaseSettings
+    llm: LLMSettings
 
     @computed_field
     @property

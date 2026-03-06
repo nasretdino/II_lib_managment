@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.db.base_model import Base
 from src.db import get_db
 from src.main import app
+from src.modules.rag.dependencies import get_rag
+from src.modules.rag.schemas import SearchResult, IndexResult
 
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -63,10 +66,26 @@ async def _override_get_db():
             raise
 
 
+def _mock_rag_service():
+    """Мок RagService — не требует Gemini API в тестах."""
+    mock = MagicMock()
+    mock.index_document = AsyncMock(
+        return_value=IndexResult(doc_id=0, chunks_count=0, status="indexed")
+    )
+    mock.search = AsyncMock(
+        return_value=SearchResult(context_text="mock context", sources=[], mode="hybrid")
+    )
+    mock.delete_document = AsyncMock()
+    mock.initialize = AsyncMock()
+    mock.shutdown = AsyncMock()
+    return mock
+
+
 @pytest_asyncio.fixture
 async def client():
     """HTTP-клиент для интеграционных тестов роутеров."""
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_rag] = _mock_rag_service
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

@@ -15,7 +15,8 @@ from src.core import (
     NotFoundError,
 )
 from src.db import engine
-from src.modules import user_router, document_router
+from src.modules import user_router, document_router, rag_router
+from src.modules.rag.services import get_rag_service
 
 # ── Logging ───────────────────────────────────────────────
 setup_logging(settings.env)
@@ -23,7 +24,15 @@ setup_logging(settings.env)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Инициализация LightRAG при старте
+    rag = get_rag_service()
+    await rag.initialize()
+    logger.info("LightRAG initialized")
+
     yield
+
+    # Корректное завершение LightRAG
+    await rag.shutdown()
     await engine.dispose()
 
 
@@ -71,4 +80,5 @@ async def generic_error_handler(request: Request, exc: Exception):
 # ── Routers ───────────────────────────────────────────────
 app.include_router(user_router)
 app.include_router(document_router)
+app.include_router(rag_router)
 
