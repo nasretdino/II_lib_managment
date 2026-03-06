@@ -204,3 +204,5 @@ pyrightconfig.json
 *_BASE_*.txt
 *_LOCAL_*.txt
 *_REMOTE_*.txt
+# Upload artifacts
+uploads/
