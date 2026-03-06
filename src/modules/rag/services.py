@@ -9,7 +9,9 @@ LightRAG берёт на себя:
   - Гибридный поиск: vector similarity + graph traversal
 """
 
+import asyncio
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,37 @@ from .schemas import SearchResult, IndexResult
 
 WORKING_DIR = Path("rag_storage")
 
+# ── Rate Limiter ──────────────────────────────────────────
+# Gemini free tier лимиты (скользящее окно 60 с):
+#   - embed_content:    100 req/min → ставим 80
+#   - generate_content:  20 req/min → ставим 15
+
+
+def _make_rate_limiter(limit: int, window: float = 60.0):
+    """Фабрика: возвращает async-функцию rate limiter со скользящим окном."""
+    timestamps: list[float] = []
+    lock = asyncio.Lock()
+
+    async def wait() -> None:
+        while True:
+            async with lock:
+                now = time.monotonic()
+                while timestamps and timestamps[0] <= now - window:
+                    timestamps.pop(0)
+                if len(timestamps) < limit:
+                    timestamps.append(time.monotonic())
+                    return
+                sleep_for = timestamps[0] - (now - window) + 0.5
+
+            logger.debug("Rate limit ({}): ожидание {:.1f}с", limit, sleep_for)
+            await asyncio.sleep(sleep_for)
+
+    return wait
+
+
+_wait_embed_rate = _make_rate_limiter(80)
+_wait_llm_rate = _make_rate_limiter(15)
+
 
 def _get_api_key() -> str:
     return settings.llm.gemini_api_key.get_secret_value()
@@ -36,7 +69,38 @@ async def _llm_model_func(
     keyword_extraction: bool = False,
     **kwargs,
 ) -> str:
-    """LLM-функция для LightRAG на базе Gemini."""
+    """LLM-функция для LightRAG на базе Gemini с rate limiting и retry."""
+    import re as _re
+
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        await _wait_llm_rate()
+        try:
+            return await gemini_model_complete(
+                prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages or [],
+                keyword_extraction=keyword_extraction,
+                api_key=_get_api_key(),
+                model_name=settings.llm.model_name,
+                **kwargs,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                wait = min(15.0 * attempt, 90.0)
+                match = _re.search(r"retryDelay.*?(\d+)", err_msg)
+                if match:
+                    wait = float(match.group(1)) + 2.0
+                logger.warning(
+                    "LLM 429: попытка {}/{}, ожидание {:.0f}с",
+                    attempt, max_retries, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+    # Последняя попытка — без перехвата
+    await _wait_llm_rate()
     return await gemini_model_complete(
         prompt,
         system_prompt=system_prompt,
@@ -49,7 +113,35 @@ async def _llm_model_func(
 
 
 async def _embedding_func_impl(texts: list[str]) -> np.ndarray:
-    """Embedding-функция для LightRAG на базе Gemini."""
+    """Embedding-функция для LightRAG на базе Gemini с rate limiting и retry."""
+    import re as _re
+
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        await _wait_embed_rate()
+        try:
+            return await gemini_embed.func(
+                texts,
+                api_key=_get_api_key(),
+                model=settings.llm.embedding_model,
+                embedding_dim=settings.llm.embedding_dim,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                wait = min(30.0 * attempt, 120.0)
+                match = _re.search(r"retryDelay.*?(\d+)", err_msg)
+                if match:
+                    wait = float(match.group(1)) + 2.0
+                logger.warning(
+                    "Embedding 429: попытка {}/{}, ожидание {:.0f}с",
+                    attempt, max_retries, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+    # Последняя попытка — без перехвата
+    await _wait_embed_rate()
     return await gemini_embed.func(
         texts,
         api_key=_get_api_key(),
@@ -112,8 +204,8 @@ class RagService:
             # Чанкинг (LightRAG сам разбивает текст)
             chunk_token_size=settings.llm.chunk_token_size,
             chunk_overlap_token_size=settings.llm.chunk_overlap_token_size,
-            # Производительность
-            max_parallel_insert=2,
+            # Производительность — Gemini free tier: 20 LLM req/min, 100 embed req/min
+            max_parallel_insert=1,
         )
 
         await self._rag.initialize_storages()
@@ -209,13 +301,17 @@ class RagService:
             mode=mode,
         )
 
-    async def delete_document(self, doc_id: int, chunks_count: int = 1000) -> None:
+    async def delete_document(self, doc_id: int, chunks_count: int = 0) -> None:
         """
         Удалить все чанки документа из LightRAG.
 
         LightRAG.adelete_by_doc_id() принимает doc_id — строковый ID,
         присвоенный при ainsert(). Мы использовали формат doc{N}_chunk{M}.
         """
+        if chunks_count <= 0:
+            logger.warning("Документ {} — chunks_count не задан, пропускаем удаление из RAG", doc_id)
+            return
+
         deleted_any = False
         for i in range(chunks_count):
             chunk_id = f"doc{doc_id}_chunk{i}"
@@ -223,11 +319,11 @@ class RagService:
                 await self.rag.adelete_by_doc_id(chunk_id)
                 deleted_any = True
             except Exception:
-                if not deleted_any:
-                    continue  # Возможно, чанк не существует
-                break  # Дошли до конца существующих чанков
+                logger.warning("Ошибка при удалении чанка {} из RAG", chunk_id)
+                if deleted_any:
+                    break
 
-        logger.info("Документ {} удалён из индекса", doc_id)
+        logger.info("Документ {} удалён из индекса ({} чанков)", doc_id, chunks_count)
 
 
 # ── Singleton ─────────────────────────────────────────────

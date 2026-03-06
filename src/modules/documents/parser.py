@@ -32,12 +32,20 @@ async def extract_text(file_path: str, content_type: str) -> str:
 
 async def _read_text_file(path: Path) -> str:
     """Чтение текстового файла."""
-    return await asyncio.to_thread(path.read_text, encoding="utf-8")
+    try:
+        return await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise DocumentParsingError(f"File not found: {path.name}") from exc
+    except UnicodeDecodeError as exc:
+        raise DocumentParsingError(
+            f"Failed to decode {path.name} as UTF-8: {exc}"
+        ) from exc
 
 
 async def _extract_with_markitdown(path: Path) -> str:
     """Извлечение текста через MarkItDown (sync → asyncio.to_thread)."""
     from markitdown import MarkItDown
+    from markitdown._exceptions import FileConversionException
 
     def _convert() -> str:
         md = MarkItDown()
@@ -45,4 +53,16 @@ async def _extract_with_markitdown(path: Path) -> str:
         return result.text_content
 
     logger.info("Extracting text from {} via MarkItDown", path.name)
-    return await asyncio.to_thread(_convert)
+    try:
+        text = await asyncio.to_thread(_convert)
+    except FileConversionException as exc:
+        raise DocumentParsingError(f"Failed to convert {path.name}: {exc}") from exc
+    except Exception as exc:
+        raise DocumentParsingError(
+            f"Unexpected error parsing {path.name}: {exc}"
+        ) from exc
+
+    if not text or not text.strip():
+        logger.warning("MarkItDown extracted empty text from {}", path.name)
+
+    return text

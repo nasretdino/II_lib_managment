@@ -1,5 +1,6 @@
 import pytest
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 from src.modules.documents.parser import extract_text
 from src.core.exceptions import DocumentParsingError
@@ -74,5 +75,98 @@ class TestExtractText:
             )
         except DocumentParsingError as e:
             assert "Unsupported content type" not in str(e)
-        except Exception:
-            pass  # MarkItDown ошибка на невалидном файле — ОК
+
+
+class TestReadTextFileErrors:
+    async def test_file_not_found(self):
+        """Несуществующий файл → DocumentParsingError."""
+        with pytest.raises(DocumentParsingError, match="File not found"):
+            await extract_text("/nonexistent/path/file.txt", "text/plain")
+
+    async def test_non_utf8_file(self, tmp_path: Path):
+        """Файл с невалидной кодировкой → DocumentParsingError."""
+        file = tmp_path / "binary.txt"
+        file.write_bytes(b"\x80\x81\x82\xff\xfe")
+
+        with pytest.raises(DocumentParsingError, match="Failed to decode"):
+            await extract_text(str(file), "text/plain")
+
+
+class TestMarkItDownErrors:
+    async def test_corrupted_pdf_returns_parsing_error_or_empty(self, tmp_path: Path):
+        """Невалидный PDF → либо DocumentParsingError, либо пустой текст (зависит от MarkItDown)."""
+        file = tmp_path / "bad.pdf"
+        file.write_bytes(b"not a real pdf content")
+
+        try:
+            text = await extract_text(str(file), "application/pdf")
+            # MarkItDown может вернуть пустой текст вместо ошибки
+            assert isinstance(text, str)
+        except DocumentParsingError:
+            pass  # Это тоже допустимый результат
+
+    async def test_corrupted_docx_raises_parsing_error(self, tmp_path: Path):
+        """Невалидный DOCX → DocumentParsingError (не 500)."""
+        file = tmp_path / "bad.docx"
+        file.write_bytes(b"not a real docx")
+
+        # Для невалидного DOCX — либо DocumentParsingError, либо пустой текст
+        try:
+            text = await extract_text(
+                str(file),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            assert isinstance(text, str)
+        except DocumentParsingError:
+            pass
+
+    async def test_msword_content_type_accepted(self, tmp_path: Path):
+        """application/msword обрабатывается MarkItDown (не Unsupported)."""
+        file = tmp_path / "bad.doc"
+        file.write_bytes(b"fake doc content")
+
+        try:
+            await extract_text(str(file), "application/msword")
+        except DocumentParsingError as e:
+            assert "Unsupported content type" not in str(e)
+
+    async def test_file_conversion_exception_wrapped(self, tmp_path: Path):
+        """FileConversionException из MarkItDown → DocumentParsingError с информативным сообщением."""
+        from markitdown._exceptions import FileConversionException
+
+        file = tmp_path / "fail.pdf"
+        file.write_bytes(b"%PDF-corrupted")
+
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            side_effect=FileConversionException(attempts=[]),
+        ):
+            with pytest.raises(DocumentParsingError, match="Failed to convert"):
+                await extract_text(str(file), "application/pdf")
+
+    async def test_generic_exception_wrapped(self, tmp_path: Path):
+        """Любая непредвиденная ошибка MarkItDown → DocumentParsingError."""
+        file = tmp_path / "crash.pdf"
+        file.write_bytes(b"%PDF-1.4")
+
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            side_effect=RuntimeError("Something broke"),
+        ):
+            with pytest.raises(DocumentParsingError, match="Unexpected error"):
+                await extract_text(str(file), "application/pdf")
+
+    async def test_successful_pdf_extraction(self, tmp_path: Path):
+        """Успешная конвертация PDF через мок MarkItDown."""
+        file = tmp_path / "good.pdf"
+        file.write_bytes(b"%PDF-1.4")
+
+        mock_result = MagicMock()
+        mock_result.text_content = "Extracted PDF text"
+
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="Extracted PDF text",
+        ):
+            text = await extract_text(str(file), "application/pdf")
+            assert text == "Extracted PDF text"

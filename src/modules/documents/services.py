@@ -26,9 +26,9 @@ class DocumentService:
         Оркестрация пайплайна загрузки:
         1. Сохранить файл на диск
         2. Создать запись в БД (status="pending")
-        3. Вызвать parser.extract_text() → text_content
-        4. Вызвать chunking.split_into_chunks() → список чанков
-        5. TODO: передать чанки в RagService для индексации через LightRAG
+        3. Извлечь текст через parser.extract_text()
+        4. Разбить на чанки через chunking.split_into_chunks()
+        5. Проиндексировать в LightRAG через RagService
         6. Обновить status="ready"
         """
         user_dir = UPLOAD_DIR / str(user_id)
@@ -70,7 +70,13 @@ class DocumentService:
                 "Document {} split into {} chunks", doc.filename, len(chunks)
             )
 
-            # 5. Передать чанки в RagService для индексации через LightRAG
+            # 5. Сохранить количество чанков
+            await self.dao.update(
+                filters={"id": doc.id},
+                values={"chunks_count": len(chunks)},
+            )
+
+            # 6. Передать чанки в RagService для индексации через LightRAG
             if self.rag is not None:
                 await self.rag.index_document(
                     doc_id=doc.id,
@@ -79,10 +85,11 @@ class DocumentService:
                 )
                 logger.info("Document {} indexed in RAG", doc.filename)
 
-            # 6. Обновить статус
+            # 7. Обновить статус
             await self.dao.update_status(doc.id, "ready")
             doc.status = "ready"
             doc.text_content = text
+            doc.chunks_count = len(chunks)
 
         except DocumentParsingError:
             logger.error("Parsing error for document {}", doc.filename)
@@ -116,7 +123,7 @@ class DocumentService:
         # Удалить из RAG-индекса
         if self.rag is not None:
             try:
-                await self.rag.delete_document(doc_id)
+                await self.rag.delete_document(doc_id, chunks_count=doc.chunks_count or 0)
             except Exception:
                 logger.warning("Failed to delete doc {} from RAG index", doc_id)
 

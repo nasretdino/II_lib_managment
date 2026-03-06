@@ -206,3 +206,6 @@ pyrightconfig.json
 *_REMOTE_*.txt
 # Upload artifacts
 uploads/
+
+# LightRAG working directory (generated graphs, caches)
+rag_storage/
