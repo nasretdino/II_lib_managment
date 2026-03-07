@@ -1,5 +1,5 @@
 import io
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import UploadFile
@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.exceptions import DocumentParsingError
 from src.modules.documents.dao import DocumentDAO
 from src.modules.documents.services import DocumentService
+from src.modules.rag.schemas import IndexResult
 from src.modules.users.dao import UserDAO
 from src.modules.users.schemas import UserCreate
 
@@ -241,3 +242,261 @@ class TestDocumentServiceUpload:
         )
         doc = await doc_service.upload(user.id, file)
         assert Path(doc.file_path).exists()
+
+
+class TestDocumentServiceUploadAllFileTypes:
+    """Тесты upload для всех поддерживаемых типов файлов (PDF, DOCX, DOC)."""
+
+    async def test_upload_pdf(self, doc_service: DocumentService, user):
+        """Upload PDF через мок extract_text."""
+        file = UploadFile(
+            filename="report.pdf",
+            file=io.BytesIO(b"%PDF-1.4"),
+            headers={"content-type": "application/pdf"},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            return_value="PDF text content here",
+        ):
+            doc = await doc_service.upload(user.id, file)
+
+        assert doc.filename == "report.pdf"
+        assert doc.content_type == "application/pdf"
+        assert doc.status == "ready"
+        assert doc.text_content == "PDF text content here"
+
+    async def test_upload_docx(self, doc_service: DocumentService, user):
+        """Upload DOCX."""
+        ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        file = UploadFile(
+            filename="document.docx",
+            file=io.BytesIO(b"PK\x03\x04"),
+            headers={"content-type": ct},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            return_value="DOCX extracted text",
+        ):
+            doc = await doc_service.upload(user.id, file)
+
+        assert doc.filename == "document.docx"
+        assert doc.content_type == ct
+        assert doc.status == "ready"
+        assert doc.text_content == "DOCX extracted text"
+
+    async def test_upload_doc(self, doc_service: DocumentService, user):
+        """Upload DOC (application/msword)."""
+        file = UploadFile(
+            filename="legacy.doc",
+            file=io.BytesIO(b"\xd0\xcf\x11\xe0"),
+            headers={"content-type": "application/msword"},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            return_value="DOC text content",
+        ):
+            doc = await doc_service.upload(user.id, file)
+
+        assert doc.filename == "legacy.doc"
+        assert doc.content_type == "application/msword"
+        assert doc.status == "ready"
+
+    async def test_upload_unsupported_image(self, doc_service: DocumentService, user):
+        """Upload image/jpeg → DocumentParsingError."""
+        file = UploadFile(
+            filename="photo.jpg",
+            file=io.BytesIO(b"\xff\xd8\xff\xe0"),
+            headers={"content-type": "image/jpeg"},
+        )
+        with pytest.raises(DocumentParsingError):
+            await doc_service.upload(user.id, file)
+
+    async def test_upload_unsupported_zip(self, doc_service: DocumentService, user):
+        """Upload application/zip → DocumentParsingError."""
+        file = UploadFile(
+            filename="archive.zip",
+            file=io.BytesIO(b"PK\x03\x04"),
+            headers={"content-type": "application/zip"},
+        )
+        with pytest.raises(DocumentParsingError):
+            await doc_service.upload(user.id, file)
+
+
+class TestDocumentServiceUploadWithRag:
+    """Тесты upload с интеграцией RAG-сервиса."""
+
+    async def test_upload_calls_rag_index(self, db_session: AsyncSession, user):
+        """Upload вызывает rag.index_document с чанками."""
+        mock_rag = MagicMock()
+        mock_rag.index_document = AsyncMock(
+            return_value=IndexResult(doc_id=0, chunks_count=1, status="indexed")
+        )
+        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+
+        file = UploadFile(
+            filename="rag.txt",
+            file=io.BytesIO(b"Some text for RAG indexing"),
+            headers={"content-type": "text/plain"},
+        )
+        doc = await service.upload(user.id, file)
+        assert doc.status == "ready"
+
+        mock_rag.index_document.assert_awaited_once()
+        call_kwargs = mock_rag.index_document.call_args[1]
+        assert call_kwargs["doc_id"] == doc.id
+        assert isinstance(call_kwargs["chunks"], list)
+        assert len(call_kwargs["chunks"]) >= 1
+
+    async def test_upload_without_rag(self, db_session: AsyncSession, user):
+        """Upload без RAG-сервиса работает (rag=None)."""
+        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        file = UploadFile(
+            filename="no_rag.txt",
+            file=io.BytesIO(b"Content without RAG"),
+            headers={"content-type": "text/plain"},
+        )
+        doc = await service.upload(user.id, file)
+        assert doc.status == "ready"
+
+    async def test_upload_sets_chunks_count(self, db_session: AsyncSession, user):
+        """Upload сохраняет количество чанков."""
+        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        # Достаточно текста для нескольких чанков
+        text = "Paragraph of content. " * 200
+        file = UploadFile(
+            filename="chunks.txt",
+            file=io.BytesIO(text.encode()),
+            headers={"content-type": "text/plain"},
+        )
+        doc = await service.upload(user.id, file)
+        assert doc.chunks_count is not None
+        assert doc.chunks_count >= 1
+
+
+class TestDocumentServiceUploadErrors:
+    """Тесты обработки ошибок при upload."""
+
+    async def test_upload_value_error_wraps_to_parsing_error(
+        self, db_session: AsyncSession, user
+    ):
+        """ValueError из extract_text оборачивается в DocumentParsingError."""
+        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        file = UploadFile(
+            filename="fail.txt",
+            file=io.BytesIO(b"data"),
+            headers={"content-type": "text/plain"},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            side_effect=ValueError("bad value"),
+        ):
+            with pytest.raises(DocumentParsingError, match="bad value"):
+                await service.upload(user.id, file)
+
+    async def test_upload_generic_exception_sets_error_status(
+        self, db_session: AsyncSession, user
+    ):
+        """Непредвиденная ошибка → статус error."""
+        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        file = UploadFile(
+            filename="crash.txt",
+            file=io.BytesIO(b"data"),
+            headers={"content-type": "text/plain"},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("unexpected"),
+        ):
+            with pytest.raises(RuntimeError):
+                await service.upload(user.id, file)
+
+    async def test_upload_parsing_error_preserves_doc_in_db(
+        self, db_session: AsyncSession, user
+    ):
+        """При ошибке парсинга документ остаётся в БД со статусом error."""
+        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        file = UploadFile(
+            filename="err.txt",
+            file=io.BytesIO(b"data"),
+            headers={"content-type": "text/plain"},
+        )
+        with patch(
+            "src.modules.documents.services.extract_text",
+            new_callable=AsyncMock,
+            side_effect=DocumentParsingError("parse fail"),
+        ):
+            with pytest.raises(DocumentParsingError):
+                doc = await service.upload(user.id, file)
+
+        # Документ должен быть в БД со статусом error
+        dao = DocumentDAO(db_session)
+        docs = await dao.find_by_user(user.id)
+        assert len(docs) == 1
+        assert docs[0].status == "error"
+
+
+class TestDocumentServiceDeleteWithRag:
+    """Тесты удаления с RAG-интеграцией."""
+
+    async def test_delete_calls_rag_delete(self, db_session: AsyncSession, user, tmp_path):
+        """Удаление документа вызывает rag.delete_document."""
+        mock_rag = MagicMock()
+        mock_rag.delete_document = AsyncMock()
+        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+
+        file_path = tmp_path / "del.txt"
+        file_path.write_text("content")
+
+        dao = DocumentDAO(db_session)
+        doc = await dao.add(
+            {
+                "user_id": user.id,
+                "filename": "del.txt",
+                "content_type": "text/plain",
+                "file_path": str(file_path),
+                "text_content": "content",
+                "status": "ready",
+                "chunks_count": 3,
+            },
+            flush=True,
+        )
+
+        deleted = await service.delete(doc.id)
+        assert deleted is True
+        mock_rag.delete_document.assert_awaited_once_with(
+            doc.id, chunks_count=3
+        )
+
+    async def test_delete_rag_failure_still_deletes(
+        self, db_session: AsyncSession, user, tmp_path
+    ):
+        """Ошибка RAG при удалении не мешает удалению из БД и диска."""
+        mock_rag = MagicMock()
+        mock_rag.delete_document = AsyncMock(side_effect=Exception("RAG fail"))
+        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+
+        file_path = tmp_path / "rag_fail.txt"
+        file_path.write_text("text")
+
+        dao = DocumentDAO(db_session)
+        doc = await dao.add(
+            {
+                "user_id": user.id,
+                "filename": "rag_fail.txt",
+                "content_type": "text/plain",
+                "file_path": str(file_path),
+                "text_content": "text",
+                "status": "ready",
+                "chunks_count": 2,
+            },
+            flush=True,
+        )
+
+        deleted = await service.delete(doc.id)
+        assert deleted is True
+        assert not file_path.exists()

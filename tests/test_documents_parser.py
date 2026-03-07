@@ -170,3 +170,157 @@ class TestMarkItDownErrors:
         ):
             text = await extract_text(str(file), "application/pdf")
             assert text == "Extracted PDF text"
+
+
+class TestExtractTextAllTypes:
+    """Тесты extract_text для всех поддерживаемых content-type."""
+
+    async def test_txt_is_supported(self, tmp_path: Path):
+        file = tmp_path / "doc.txt"
+        file.write_text("text content", encoding="utf-8")
+        text = await extract_text(str(file), "text/plain")
+        assert text == "text content"
+
+    async def test_pdf_is_supported(self, tmp_path: Path):
+        """application/pdf → _extract_with_markitdown (мок)."""
+        file = tmp_path / "doc.pdf"
+        file.write_bytes(b"%PDF-1.4")
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="PDF text",
+        ):
+            text = await extract_text(str(file), "application/pdf")
+        assert text == "PDF text"
+
+    async def test_docx_is_supported(self, tmp_path: Path):
+        """DOCX content-type → _extract_with_markitdown."""
+        ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        file = tmp_path / "doc.docx"
+        file.write_bytes(b"PK\x03\x04")
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="DOCX text",
+        ):
+            text = await extract_text(str(file), ct)
+        assert text == "DOCX text"
+
+    async def test_doc_is_supported(self, tmp_path: Path):
+        """application/msword → _extract_with_markitdown."""
+        file = tmp_path / "doc.doc"
+        file.write_bytes(b"\xd0\xcf\x11\xe0")
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="DOC text",
+        ):
+            text = await extract_text(str(file), "application/msword")
+        assert text == "DOC text"
+
+    async def test_image_png_rejected(self, tmp_path: Path):
+        file = tmp_path / "img.png"
+        file.write_bytes(b"\x89PNG")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "image/png")
+
+    async def test_image_jpeg_rejected(self, tmp_path: Path):
+        file = tmp_path / "img.jpg"
+        file.write_bytes(b"\xff\xd8\xff")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "image/jpeg")
+
+    async def test_audio_rejected(self, tmp_path: Path):
+        file = tmp_path / "sound.mp3"
+        file.write_bytes(b"\xff\xfb")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "audio/mpeg")
+
+    async def test_video_rejected(self, tmp_path: Path):
+        file = tmp_path / "video.mp4"
+        file.write_bytes(b"\x00\x00\x00")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "video/mp4")
+
+    async def test_csv_rejected(self, tmp_path: Path):
+        file = tmp_path / "data.csv"
+        file.write_text("a,b,c")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "text/csv")
+
+    async def test_json_rejected(self, tmp_path: Path):
+        file = tmp_path / "data.json"
+        file.write_text('{"a": 1}')
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "application/json")
+
+    async def test_xml_rejected(self, tmp_path: Path):
+        file = tmp_path / "data.xml"
+        file.write_text("<root/>")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "application/xml")
+
+    async def test_html_rejected(self, tmp_path: Path):
+        file = tmp_path / "page.html"
+        file.write_text("<html></html>")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "text/html")
+
+    async def test_zip_rejected(self, tmp_path: Path):
+        file = tmp_path / "archive.zip"
+        file.write_bytes(b"PK\x03\x04")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "application/zip")
+
+    async def test_octet_stream_rejected(self, tmp_path: Path):
+        file = tmp_path / "binary.bin"
+        file.write_bytes(b"\x00\x01\x02")
+        with pytest.raises(DocumentParsingError, match="Unsupported content type"):
+            await extract_text(str(file), "application/octet-stream")
+
+
+class TestExtractTextContent:
+    """Тесты корректности извлечённого текста."""
+
+    async def test_large_txt_file(self, tmp_path: Path):
+        """Большой текстовый файл читается полностью."""
+        content = "A line of text.\n" * 10000
+        file = tmp_path / "large.txt"
+        file.write_text(content, encoding="utf-8")
+        text = await extract_text(str(file), "text/plain")
+        assert len(text) == len(content)
+
+    async def test_unicode_content(self, tmp_path: Path):
+        """Юникод из разных алфавитов."""
+        content = "Кириллица 日本語 العربية Ελληνικά"
+        file = tmp_path / "uni.txt"
+        file.write_text(content, encoding="utf-8")
+        text = await extract_text(str(file), "text/plain")
+        assert text == content
+
+    async def test_special_characters(self, tmp_path: Path):
+        """Спецсимволы: табы, переносы, Unicode-эмодзи."""
+        content = "Tab\there\nNew line\n\n🎉 Emoji"
+        file = tmp_path / "special.txt"
+        file.write_text(content, encoding="utf-8")
+        text = await extract_text(str(file), "text/plain")
+        assert "🎉" in text
+
+    async def test_pdf_empty_extraction(self, tmp_path: Path):
+        """PDF с пустым извлечённым текстом → пустая строка."""
+        file = tmp_path / "empty.pdf"
+        file.write_bytes(b"%PDF-1.4")
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="",
+        ):
+            text = await extract_text(str(file), "application/pdf")
+        assert text == ""
+
+    async def test_pdf_whitespace_only_extraction(self, tmp_path: Path):
+        """PDF с текстом из одних пробелов."""
+        file = tmp_path / "ws.pdf"
+        file.write_bytes(b"%PDF-1.4")
+        with patch(
+            "src.modules.documents.parser.asyncio.to_thread",
+            return_value="   \n  ",
+        ):
+            text = await extract_text(str(file), "application/pdf")
+        assert text.strip() == ""

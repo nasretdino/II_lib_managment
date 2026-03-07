@@ -291,3 +291,217 @@ class TestRagRouter:
                 json={"query": "q", "mode": mode},
             )
             assert resp.status_code == 200
+
+    async def test_search_only_context_false(self, client):
+        """only_context=false в запросе."""
+        resp = await client.post(
+            "/rag/search",
+            json={"query": "test", "only_context": False},
+        )
+        assert resp.status_code == 200
+
+    async def test_search_only_context_true(self, client):
+        """only_context=true (по умолчанию)."""
+        resp = await client.post(
+            "/rag/search",
+            json={"query": "test", "only_context": True},
+        )
+        assert resp.status_code == 200
+
+    async def test_search_get_method_not_allowed(self, client):
+        """GET /rag/search → 405 Method Not Allowed."""
+        resp = await client.get("/rag/search")
+        assert resp.status_code == 405
+
+    async def test_search_put_method_not_allowed(self, client):
+        """PUT /rag/search → 405."""
+        resp = await client.put("/rag/search", json={"query": "test"})
+        assert resp.status_code == 405
+
+    async def test_search_delete_method_not_allowed(self, client):
+        """DELETE /rag/search → 405."""
+        resp = await client.delete("/rag/search")
+        assert resp.status_code == 405
+
+    async def test_search_missing_query_field(self, client):
+        """Тело без поля query → 422."""
+        resp = await client.post("/rag/search", json={"mode": "hybrid"})
+        assert resp.status_code == 422
+
+    async def test_search_extra_fields_ignored(self, client):
+        """Лишние поля в запросе не ломают обработку."""
+        resp = await client.post(
+            "/rag/search",
+            json={"query": "test", "extra_field": "ignore_me"},
+        )
+        assert resp.status_code == 200
+
+    async def test_search_long_query(self, client):
+        """Длинный запрос принимается."""
+        long_query = "слово " * 500
+        resp = await client.post("/rag/search", json={"query": long_query})
+        assert resp.status_code == 200
+
+    async def test_search_unicode_query(self, client):
+        """Unicode-запрос принимается."""
+        resp = await client.post(
+            "/rag/search",
+            json={"query": "Привет мир 你好世界 مرحبا"},
+        )
+        assert resp.status_code == 200
+
+    async def test_search_whitespace_query_rejected(self, client):
+        """Запрос из одних пробелов — query min_length=1, пробел это символ → 200."""
+        resp = await client.post("/rag/search", json={"query": " "})
+        # min_length=1, пробел — допустимый символ
+        assert resp.status_code == 200
+
+    async def test_search_sources_are_list_of_strings(self, client):
+        """sources в ответе — список строк."""
+        resp = await client.post("/rag/search", json={"query": "test"})
+        data = resp.json()
+        assert isinstance(data["sources"], list)
+        for s in data["sources"]:
+            assert isinstance(s, str)
+
+    async def test_search_context_text_is_string(self, client):
+        """context_text в ответе — строка."""
+        resp = await client.post("/rag/search", json={"query": "test"})
+        assert isinstance(resp.json()["context_text"], str)
+
+
+# ── Дополнительные тесты RagService ──────────────────────
+
+
+class TestSearchEdgeCases:
+    """Дополнительные edge-case тесты для RagService.search."""
+
+    async def test_search_no_sources_in_result(self, rag_service: RagService):
+        """Ответ без doc_id тегов → пустой sources."""
+        rag_service._rag.aquery.return_value = "Обычный текст без тегов."
+        result = await rag_service.search("query")
+        assert result.sources == []
+
+    async def test_search_non_string_result(self, rag_service: RagService):
+        """Если aquery вернул не строку → str() конвертация."""
+        rag_service._rag.aquery.return_value = 12345
+        result = await rag_service.search("query")
+        assert result.context_text == "12345"
+        assert result.sources == []
+
+    async def test_search_only_context_false(self, rag_service: RagService):
+        """only_context=False передаётся в QueryParam."""
+        await rag_service.search("query", only_context=False)
+        call_args = rag_service._rag.aquery.call_args
+        param = call_args[1]["param"]
+        assert param.only_need_context is False
+
+    async def test_search_empty_conversation_history(self, rag_service: RagService):
+        """Пустая история → пустой список в QueryParam."""
+        await rag_service.search("query", conversation_history=[])
+        call_args = rag_service._rag.aquery.call_args
+        param = call_args[1]["param"]
+        assert param.conversation_history == []
+
+
+class TestDeleteDocumentEdgeCases:
+    """Дополнительные edge-case тесты для RagService.delete_document."""
+
+    async def test_delete_zero_chunks_skips(self, rag_service: RagService):
+        """chunks_count=0 → пропускаем удаление (предупреждение в логе)."""
+        await rag_service.delete_document(doc_id=1, chunks_count=0)
+        rag_service._rag.adelete_by_doc_id.assert_not_awaited()
+
+    async def test_delete_negative_chunks_skips(self, rag_service: RagService):
+        """chunks_count < 0 → пропускаем удаление."""
+        await rag_service.delete_document(doc_id=1, chunks_count=-5)
+        rag_service._rag.adelete_by_doc_id.assert_not_awaited()
+
+    async def test_delete_single_chunk(self, rag_service: RagService):
+        """Удаление документа с 1 чанком."""
+        await rag_service.delete_document(doc_id=10, chunks_count=1)
+        rag_service._rag.adelete_by_doc_id.assert_awaited_once_with("doc10_chunk0")
+
+    async def test_delete_all_fail_no_break(self, rag_service: RagService):
+        """Если ни один чанк не удалён (все исключения) → continue, не break."""
+        rag_service._rag.adelete_by_doc_id.side_effect = Exception("not found")
+        await rag_service.delete_document(doc_id=1, chunks_count=4)
+        assert rag_service._rag.adelete_by_doc_id.await_count == 4
+
+    async def test_delete_first_fail_others_succeed(self, rag_service: RagService):
+        """Первый чанк не удалён, остальные — успешно → continue все."""
+        rag_service._rag.adelete_by_doc_id.side_effect = [
+            Exception("not found"), None, None,
+        ]
+        await rag_service.delete_document(doc_id=1, chunks_count=3)
+        assert rag_service._rag.adelete_by_doc_id.await_count == 3
+
+
+class TestIndexDocumentEdgeCases:
+    """Дополнительные edge-case тесты для index_document."""
+
+    async def test_index_single_chunk(self, rag_service: RagService):
+        """Индексация одного чанка."""
+        result = await rag_service.index_document(doc_id=99, chunks=["single chunk"])
+        assert result.chunks_count == 1
+        assert result.status == "indexed"
+
+        call_args = rag_service._rag.ainsert.call_args
+        assert call_args[1]["ids"] == ["doc99_chunk0"]
+
+    async def test_index_without_file_path(self, rag_service: RagService):
+        """Без file_path → file_paths=None."""
+        await rag_service.index_document(doc_id=1, chunks=["text"])
+        call_kwargs = rag_service._rag.ainsert.call_args[1]
+        assert call_kwargs["file_paths"] is None
+
+    async def test_index_many_chunks(self, rag_service: RagService):
+        """Индексация большого количества чанков."""
+        chunks = [f"chunk_{i}" for i in range(50)]
+        result = await rag_service.index_document(doc_id=1, chunks=chunks)
+        assert result.chunks_count == 50
+
+        call_args = rag_service._rag.ainsert.call_args
+        ids = call_args[1]["ids"]
+        assert len(ids) == 50
+        assert ids[0] == "doc1_chunk0"
+        assert ids[49] == "doc1_chunk49"
+
+    async def test_index_chunks_tagged_with_doc_id(self, rag_service: RagService):
+        """Каждый чанк тегируется [doc_id=N]."""
+        await rag_service.index_document(doc_id=42, chunks=["hello", "world"])
+        tagged = rag_service._rag.ainsert.call_args[0][0]
+        assert tagged[0] == "[doc_id=42]\nhello"
+        assert tagged[1] == "[doc_id=42]\nworld"
+
+
+class TestSchemaValidationExtra:
+    """Дополнительные тесты валидации схем."""
+
+    def test_search_request_only_query_field(self):
+        """Минимальный запрос — только query."""
+        req = SearchRequest(query="a")
+        assert req.query == "a"
+        assert req.mode == "hybrid"
+        assert req.only_context is True
+
+    def test_search_result_empty_context(self):
+        """Пустой context_text допускается."""
+        result = SearchResult(context_text="", mode="naive", sources=[])
+        assert result.context_text == ""
+
+    def test_index_result_zero_chunks(self):
+        result = IndexResult(doc_id=1, chunks_count=0, status="empty")
+        assert result.chunks_count == 0
+
+    def test_search_request_mode_naive(self):
+        req = SearchRequest(query="test", mode="naive")
+        assert req.mode == "naive"
+
+    def test_search_request_mode_mix(self):
+        req = SearchRequest(query="test", mode="mix")
+        assert req.mode == "mix"
+
+    def test_search_request_mode_local(self):
+        req = SearchRequest(query="test", mode="local")
+        assert req.mode == "local"
