@@ -47,8 +47,8 @@ class LLMSettings(BaseModel):
     workspace: str = "default"
 
     # Rate limiting (скользящее окно)
-    llm_rate_limit: int = 15
-    embed_rate_limit: int = 80
+    llm_rate_limit: int = 5          # запросов в окно (для free tier — снизить до 2-3)
+    embed_rate_limit: int = 50
     rate_limit_window: float = 60.0
 
     # Retry при 429 / RESOURCE_EXHAUSTED

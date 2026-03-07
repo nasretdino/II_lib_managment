@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import UploadFile
 from loguru import logger
 
-from src.core.exceptions import DocumentParsingError
+from src.core.exceptions import DailyQuotaExhaustedError, DocumentParsingError
 from src.modules.rag.services import RagService
 
 from .chunking import split_into_chunks
@@ -91,6 +91,14 @@ class DocumentService:
             doc.text_content = text
             doc.chunks_count = len(chunks)
 
+        except DailyQuotaExhaustedError:
+            logger.error(
+                "Daily quota exhausted while processing document {}",
+                doc.filename,
+            )
+            await self.dao.update_status(doc.id, "pending")
+            doc.status = "pending"
+            raise
         except DocumentParsingError:
             logger.error("Parsing error for document {}", doc.filename)
             await self.dao.update_status(doc.id, "error")

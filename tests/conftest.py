@@ -1,6 +1,6 @@
 import shutil
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -41,11 +41,12 @@ async def setup_db():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_uploads():
-    """Удаляет папку uploads/ после каждого теста."""
-    yield
-    if UPLOADS_DIR.exists():
-        shutil.rmtree(UPLOADS_DIR)
+def isolate_uploads(tmp_path):
+    """Перенаправляет UPLOAD_DIR в временную папку, чтобы тесты не трогали реальную uploads/."""
+    test_uploads = tmp_path / "uploads"
+    test_uploads.mkdir()
+    with patch("src.modules.documents.services.UPLOAD_DIR", test_uploads):
+        yield test_uploads
 
 
 @pytest_asyncio.fixture

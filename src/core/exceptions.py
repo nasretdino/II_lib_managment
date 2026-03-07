@@ -36,3 +36,10 @@ class LLMProviderError(Exception):
     def __init__(self, detail: str = "LLM provider error"):
         self.detail = detail
         super().__init__(detail)
+
+
+class DailyQuotaExhaustedError(LLMProviderError):
+    """Дневной лимит запросов LLM (free tier) исчерпан (→ 429)."""
+
+    def __init__(self, detail: str = "Daily LLM quota exhausted"):
+        super().__init__(detail)

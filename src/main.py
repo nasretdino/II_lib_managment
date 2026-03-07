@@ -10,6 +10,7 @@ from src.core import (
     settings,
     setup_logging,
     ConflictError,
+    DailyQuotaExhaustedError,
     DocumentParsingError,
     LLMProviderError,
     NotFoundError,
@@ -58,6 +59,15 @@ async def conflict_handler(request: Request, exc: ConflictError):
 @app.exception_handler(DocumentParsingError)
 async def document_parsing_handler(request: Request, exc: DocumentParsingError):
     return JSONResponse(status_code=422, content={"detail": exc.detail})
+
+
+@app.exception_handler(DailyQuotaExhaustedError)
+async def daily_quota_handler(request: Request, exc: DailyQuotaExhaustedError):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": exc.detail},
+        headers={"Retry-After": "3600"},
+    )
 
 
 @app.exception_handler(LLMProviderError)

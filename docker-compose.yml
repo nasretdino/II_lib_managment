@@ -33,6 +33,7 @@ services:
       - "8000:8000"
     volumes:
       - uploads_data:/app/uploads
+      - rag_storage_data:/app/rag_storage
     depends_on:
       db:
         condition: service_healthy
@@ -42,3 +43,4 @@ services:
 volumes:
   postgres_data:
   uploads_data:
+  rag_storage_data:

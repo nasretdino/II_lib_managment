@@ -1,6 +1,7 @@
 from .config import settings
 from .exceptions import (
     ConflictError,
+    DailyQuotaExhaustedError,
     DocumentParsingError,
     LLMProviderError,
     NotFoundError,
@@ -14,5 +15,6 @@ __all__ = [
     "NotFoundError",
     "ConflictError",
     "DocumentParsingError",
+    "DailyQuotaExhaustedError",
     "LLMProviderError",
 ]

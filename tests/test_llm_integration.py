@@ -27,9 +27,6 @@ from src.modules.rag.services import (
 )
 
 
-pytestmark = pytest.mark.asyncio
-
-
 # ── Helpers ───────────────────────────────────────────────
 
 
@@ -70,6 +67,7 @@ def _make_service(provider: MagicMock | None = None) -> RagService:
 # ── Rate Limiter ──────────────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestRateLimiter:
     """Тесты скользящего окна rate limiter."""
 
@@ -121,6 +119,7 @@ class TestRateLimiter:
 # ── LLM Provider ─────────────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestGeminiProvider:
     """Тесты GeminiProvider: complete() и embed()."""
 
@@ -239,6 +238,7 @@ class TestCreateProvider:
 # ── RagService._llm_func ─────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestRagServiceLLMFunc:
     """Тесты RagService._llm_func: rate limiting + retry."""
 
@@ -306,8 +306,9 @@ class TestRagServiceLLMFunc:
 
         assert service._provider.complete.await_count == 1
 
+    @patch("src.modules.rag.services.random.uniform", return_value=0.0)
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retry_parses_retry_delay(self, mock_sleep):
+    async def test_retry_parses_retry_delay(self, mock_sleep, _mock_rand):
         """retryDelay в сообщении ошибки парсится и используется для ожидания."""
         service = _make_service()
         service._provider.complete.side_effect = [
@@ -350,8 +351,9 @@ class TestRagServiceLLMFunc:
         # 5 в цикле + 1 финальная = 6
         assert service._provider.complete.await_count == 6
 
+    @patch("src.modules.rag.services.random.uniform", return_value=0.0)
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retry_wait_capped_at_max_delay(self, mock_sleep):
+    async def test_retry_wait_capped_at_max_delay(self, mock_sleep, _mock_rand):
         """Задержка при retry ограничена llm_retry_max_delay (90с)."""
         service = _make_service()
         service._provider.complete.side_effect = [
@@ -365,18 +367,19 @@ class TestRagServiceLLMFunc:
 
         await service._llm_func("prompt")
 
-        # base_delay=15, formula: min(15*attempt, 90)
+        # base_delay=15, formula: min(15 * 2^(attempt-1), 90)
         sleep_calls = [c[0][0] for c in mock_sleep.call_args_list]
-        assert sleep_calls[0] == 15.0  # attempt 1
-        assert sleep_calls[1] == 30.0  # attempt 2
-        assert sleep_calls[2] == 45.0  # attempt 3
-        assert sleep_calls[3] == 60.0  # attempt 4
-        assert sleep_calls[4] == 75.0  # attempt 5
+        assert sleep_calls[0] == 15.0   # attempt 1: 15*1
+        assert sleep_calls[1] == 30.0   # attempt 2: 15*2
+        assert sleep_calls[2] == 60.0   # attempt 3: 15*4
+        assert sleep_calls[3] == 90.0   # attempt 4: min(15*8, 90)
+        assert sleep_calls[4] == 90.0   # attempt 5: min(15*16, 90)
 
 
 # ── RagService._embed_func ───────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestRagServiceEmbedFunc:
     """Тесты RagService._embed_func: rate limiting + retry."""
 
@@ -425,8 +428,9 @@ class TestRagServiceEmbedFunc:
 
         assert service._provider.embed.await_count == 1
 
+    @patch("src.modules.rag.services.random.uniform", return_value=0.0)
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retry_parses_retry_delay(self, mock_sleep):
+    async def test_retry_parses_retry_delay(self, mock_sleep, _mock_rand):
         """retryDelay в ошибке парсится."""
         service = _make_service()
         service._provider.embed.side_effect = [
@@ -451,8 +455,9 @@ class TestRagServiceEmbedFunc:
         # 5 в цикле + 1 финальная = 6
         assert service._provider.embed.await_count == 6
 
+    @patch("src.modules.rag.services.random.uniform", return_value=0.0)
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    async def test_retry_wait_capped_at_max_delay(self, mock_sleep):
+    async def test_retry_wait_capped_at_max_delay(self, mock_sleep, _mock_rand):
         """Задержка embedding retry ограничена embed_retry_max_delay (120с)."""
         service = _make_service()
         service._provider.embed.side_effect = [
@@ -466,13 +471,13 @@ class TestRagServiceEmbedFunc:
 
         await service._embed_func(["text"])
 
-        # base_delay=30, formula: min(30*attempt, 120)
+        # base_delay=30, formula: min(30 * 2^(attempt-1), 120)
         sleep_calls = [c[0][0] for c in mock_sleep.call_args_list]
-        assert sleep_calls[0] == 30.0   # attempt 1
-        assert sleep_calls[1] == 60.0   # attempt 2
-        assert sleep_calls[2] == 90.0   # attempt 3
-        assert sleep_calls[3] == 120.0  # attempt 4
-        assert sleep_calls[4] == 120.0  # attempt 5: min(150, 120)
+        assert sleep_calls[0] == 30.0   # attempt 1: 30*1
+        assert sleep_calls[1] == 60.0   # attempt 2: 30*2
+        assert sleep_calls[2] == 120.0  # attempt 3: 30*4
+        assert sleep_calls[3] == 120.0  # attempt 4: min(30*8, 120)
+        assert sleep_calls[4] == 120.0  # attempt 5: min(30*16, 120)
 
     async def test_multiple_texts_embedding(self):
         """Батч из нескольких текстов обрабатывается как один вызов."""
@@ -489,6 +494,7 @@ class TestRagServiceEmbedFunc:
 # ── _build_embedding_func ────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestBuildEmbeddingFunc:
     """Тесты RagService._build_embedding_func."""
 
@@ -529,6 +535,7 @@ class TestBuildEmbeddingFunc:
 # ── Singleton ─────────────────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestGetRagServiceSingleton:
     """Тесты get_rag_service singleton."""
 
@@ -547,6 +554,7 @@ class TestGetRagServiceSingleton:
 # ── Edge Cases ────────────────────────────────────────────
 
 
+@pytest.mark.asyncio
 class TestRagServiceWrapperEdgeCases:
     """Дополнительные edge-case тесты для LLM/Embed wrappers."""
 

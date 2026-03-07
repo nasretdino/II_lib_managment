@@ -1,4 +1,5 @@
 import io
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -107,3 +108,55 @@ class TestExceptionHandlers:
         """Нулевой ID → 422 (gt=0 валидация)."""
         resp = await client.get("/documents/0")
         assert resp.status_code == 422
+
+    async def test_sqlalchemy_error_returns_500(self, client: AsyncClient):
+        """SQLAlchemyError → 500 через exception handler."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        with patch(
+            "src.modules.users.services.UserService.get_by_id",
+            side_effect=SQLAlchemyError("DB connection lost"),
+        ):
+            resp = await client.get("/users/1")
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "Internal server error"
+
+    async def test_generic_exception_returns_500(self):
+        """Непредвиденное исключение → 500 через generic handler."""
+        from starlette.requests import Request
+        from src.main import generic_error_handler
+
+        scope = {
+            "type": "http",
+            "method": "GET",
+            "path": "/test",
+            "headers": [],
+            "query_string": b"",
+        }
+        request = Request(scope)
+        response = await generic_error_handler(request, RuntimeError("unexpected crash"))
+        assert response.status_code == 500
+        body = response.body.decode()
+        assert "Internal server error" in body
+
+    async def test_conflict_error_returns_409(self, client: AsyncClient):
+        """ConflictError → 409 через exception handler."""
+        with patch(
+            "src.modules.users.services.UserService.create",
+            side_effect=ConflictError("User already exists"),
+        ):
+            resp = await client.post("/users/", json={"name": "Alice"})
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "User already exists"
+
+    async def test_llm_provider_error_returns_502(self):
+        """LLMProviderError → 502 через exception handler."""
+        from starlette.requests import Request
+        from src.main import llm_provider_handler
+
+        scope = {"type": "http", "method": "POST", "path": "/rag/search"}
+        request = Request(scope)
+        response = await llm_provider_handler(request, LLMProviderError("Gemini API timeout"))
+        assert response.status_code == 502
+        body = response.body.decode()
+        assert "Gemini API timeout" in body

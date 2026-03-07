@@ -5,7 +5,7 @@ RagService зависит от LightRAG и Gemini API — в тестах мок
 внутренний экземпляр LightRAG чтобы изолировать бизнес-логику.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -229,6 +229,32 @@ class TestLifecycle:
         await rag_service.shutdown()
 
         assert rag_service._rag is None
+
+    async def test_shutdown_when_not_initialized(self):
+        """shutdown() без инициализации не падает."""
+        service = RagService(provider=MagicMock())
+        await service.shutdown()  # _rag is None → ничего не делает
+        assert service._rag is None
+
+    @patch("src.modules.rag.services.LightRAG")
+    async def test_initialize_creates_lightrag(self, mock_lightrag_cls):
+        """initialize() создаёт экземпляр LightRAG и вызывает initialize_storages."""
+        mock_instance = MagicMock()
+        mock_instance.initialize_storages = AsyncMock()
+        mock_lightrag_cls.return_value = mock_instance
+
+        provider = MagicMock()
+        provider.model_name = "test-model"
+        provider.embedding_model = "test-embed"
+        provider.embedding_dim = 768
+        provider.max_token_size = 8192
+
+        service = RagService(provider=provider)
+        await service.initialize()
+
+        mock_lightrag_cls.assert_called_once()
+        mock_instance.initialize_storages.assert_awaited_once()
+        assert service._rag is mock_instance
 
 
 # ── Router /rag/search ────────────────────────────────────
