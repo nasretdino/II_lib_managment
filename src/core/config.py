@@ -30,16 +30,33 @@ class DatabaseSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    """Настройки LLM-провайдера (Gemini)."""
+    """Настройки LLM-провайдера (провайдер-агностичные)."""
 
-    gemini_api_key: SecretStr
+    provider: Literal["gemini"] = "gemini"
+    api_key: SecretStr
+
+    # Модели
     model_name: str = "gemini-2.5-flash"
     embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 768
     max_token_size: int = 8192
+
+    # Чанкинг (LightRAG)
     chunk_token_size: int = 1200
     chunk_overlap_token_size: int = 100
     workspace: str = "default"
+
+    # Rate limiting (скользящее окно)
+    llm_rate_limit: int = 15
+    embed_rate_limit: int = 80
+    rate_limit_window: float = 60.0
+
+    # Retry при 429 / RESOURCE_EXHAUSTED
+    max_retries: int = 5
+    llm_retry_base_delay: float = 15.0
+    llm_retry_max_delay: float = 90.0
+    embed_retry_base_delay: float = 30.0
+    embed_retry_max_delay: float = 120.0
 
 
 class AppSettings(BaseSettings):

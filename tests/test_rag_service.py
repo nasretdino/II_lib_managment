@@ -20,7 +20,7 @@ from src.modules.rag.services import RagService
 @pytest.fixture
 def rag_service() -> RagService:
     """RagService с замоканным LightRAG-экземпляром."""
-    service = RagService()
+    service = RagService(provider=MagicMock())
 
     mock_rag = MagicMock()
     mock_rag.ainsert = AsyncMock()
@@ -220,7 +220,7 @@ class TestDeleteDocument:
 class TestLifecycle:
     async def test_rag_not_initialized_raises(self):
         """Доступ к rag до initialize() выбрасывает RuntimeError."""
-        service = RagService()
+        service = RagService(provider=MagicMock())
         with pytest.raises(RuntimeError, match="не инициализирован"):
             _ = service.rag
 

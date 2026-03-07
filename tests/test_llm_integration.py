@@ -1,32 +1,73 @@
 """
-Тесты для ИИ-модельных функций: LLM, embedding, rate limiter.
+Тесты для LLM-провайдера, RagService wrappers и rate limiter.
 
 Все внешние вызовы (Gemini API) мокаются — тестируется
-бизнес-логика: retry на 429, rate limiter, передача параметров,
-корректность EmbeddingFunc.
+бизнес-логика: provider abstraction, retry на 429, rate limiter,
+передача параметров, корректность EmbeddingFunc.
 """
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock, PropertyMock
 
 import numpy as np
 import pytest
+from pydantic import SecretStr
 
+from src.core.config import LLMSettings
+from src.modules.rag.llm_provider import (
+    LLMProvider,
+    GeminiProvider,
+    create_provider,
+)
 from src.modules.rag.services import (
     _make_rate_limiter,
-    _llm_model_func,
-    _embedding_func_impl,
-    _build_embedding_func,
     get_rag_service,
     RagService,
 )
 
 
-# ── Rate Limiter ──────────────────────────────────────────
-
-
 pytestmark = pytest.mark.asyncio
+
+
+# ── Helpers ───────────────────────────────────────────────
+
+
+def _make_llm_settings(**overrides) -> LLMSettings:
+    """Создать LLMSettings с тестовыми значениями."""
+    defaults = {
+        "provider": "gemini",
+        "api_key": SecretStr("test-api-key"),
+        "model_name": "gemini-2.5-flash",
+        "embedding_model": "gemini-embedding-001",
+        "embedding_dim": 768,
+        "max_token_size": 8192,
+    }
+    defaults.update(overrides)
+    return LLMSettings(**defaults)
+
+
+def _make_mock_provider() -> MagicMock:
+    """MagicMock с атрибутами LLMProvider."""
+    provider = MagicMock(spec=LLMProvider)
+    provider.model_name = "test-model"
+    provider.embedding_model = "test-embed-model"
+    provider.embedding_dim = 768
+    provider.max_token_size = 8192
+    provider.complete = AsyncMock(return_value="LLM response")
+    provider.embed = AsyncMock(return_value=np.array([[0.1, 0.2, 0.3]]))
+    return provider
+
+
+def _make_service(provider: MagicMock | None = None) -> RagService:
+    """Создать RagService с мок-провайдером и отключённым rate limiter."""
+    svc = RagService(provider or _make_mock_provider())
+    svc._wait_llm_rate = AsyncMock()
+    svc._wait_embed_rate = AsyncMock()
+    return svc
+
+
+# ── Rate Limiter ──────────────────────────────────────────
 
 
 class TestRateLimiter:
@@ -77,126 +118,214 @@ class TestRateLimiter:
         assert time.monotonic() - start < 0.1
 
 
-# ── LLM Function ─────────────────────────────────────────
+# ── LLM Provider ─────────────────────────────────────────
 
 
-class TestLLMModelFunc:
-    """Тесты _llm_model_func: retry, parameter passing."""
+class TestGeminiProvider:
+    """Тесты GeminiProvider: complete() и embed()."""
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_successful_call(self, mock_key, mock_complete, mock_rate):
-        """Успешный вызов — gemini_model_complete вызывается один раз."""
-        mock_complete.return_value = "LLM response"
+    @patch("lightrag.llm.gemini.gemini_model_complete", new_callable=AsyncMock)
+    async def test_complete_calls_gemini(self, mock_complete):
+        """complete() вызывает gemini_model_complete с правильными параметрами."""
+        mock_complete.return_value = "response"
+        settings = _make_llm_settings()
+        provider = GeminiProvider(settings)
 
-        result = await _llm_model_func("test prompt")
+        result = await provider.complete("test prompt", system_prompt="sys")
+
+        assert result == "response"
+        mock_complete.assert_awaited_once()
+        call_kwargs = mock_complete.call_args[1]
+        assert call_kwargs["api_key"] == "test-api-key"
+        assert call_kwargs["model_name"] == "gemini-2.5-flash"
+        assert call_kwargs["system_prompt"] == "sys"
+
+    @patch("lightrag.llm.gemini.gemini_model_complete", new_callable=AsyncMock)
+    async def test_complete_default_history_is_empty_list(self, mock_complete):
+        """Без history_messages передаётся пустой список в Gemini."""
+        mock_complete.return_value = "ok"
+        provider = GeminiProvider(_make_llm_settings())
+
+        await provider.complete("prompt")
+
+        call_kwargs = mock_complete.call_args[1]
+        assert call_kwargs["history_messages"] == []
+
+    @patch("lightrag.llm.gemini.gemini_model_complete", new_callable=AsyncMock)
+    async def test_complete_passes_extra_kwargs(self, mock_complete):
+        """Дополнительные kwargs пробрасываются в gemini_model_complete."""
+        mock_complete.return_value = "ok"
+        provider = GeminiProvider(_make_llm_settings())
+
+        await provider.complete("prompt", temperature=0.5, top_k=40)
+
+        call_kwargs = mock_complete.call_args[1]
+        assert call_kwargs["temperature"] == 0.5
+        assert call_kwargs["top_k"] == 40
+
+    @patch("lightrag.llm.gemini.gemini_embed")
+    async def test_embed_calls_gemini(self, mock_embed):
+        """embed() вызывает gemini_embed.func с правильными параметрами."""
+        expected = np.array([[0.1, 0.2, 0.3]])
+        mock_embed.func = AsyncMock(return_value=expected)
+
+        provider = GeminiProvider(_make_llm_settings())
+        result = await provider.embed(["hello"])
+
+        np.testing.assert_array_equal(result, expected)
+        mock_embed.func.assert_awaited_once()
+        call_kwargs = mock_embed.func.call_args[1]
+        assert call_kwargs["api_key"] == "test-api-key"
+        assert call_kwargs["model"] == "gemini-embedding-001"
+        assert call_kwargs["embedding_dim"] == 768
+
+    @patch("lightrag.llm.gemini.gemini_embed")
+    async def test_embed_passes_texts(self, mock_embed):
+        """Список текстов передаётся как первый аргумент."""
+        mock_embed.func = AsyncMock(return_value=np.array([[0.0]]))
+        provider = GeminiProvider(_make_llm_settings())
+
+        texts = ["text1", "text2", "text3"]
+        await provider.embed(texts)
+
+        call_args = mock_embed.func.call_args[0]
+        assert call_args[0] == texts
+
+
+class TestLLMProviderProperties:
+    """Тесты свойств LLMProvider."""
+
+    def test_model_name(self):
+        provider = GeminiProvider(_make_llm_settings(model_name="custom-model"))
+        assert provider.model_name == "custom-model"
+
+    def test_embedding_model(self):
+        provider = GeminiProvider(_make_llm_settings(embedding_model="custom-embed"))
+        assert provider.embedding_model == "custom-embed"
+
+    def test_embedding_dim(self):
+        provider = GeminiProvider(_make_llm_settings(embedding_dim=1024))
+        assert provider.embedding_dim == 1024
+
+    def test_max_token_size(self):
+        provider = GeminiProvider(_make_llm_settings(max_token_size=4096))
+        assert provider.max_token_size == 4096
+
+
+class TestCreateProvider:
+    """Тесты фабрики create_provider."""
+
+    def test_creates_gemini(self):
+        """provider='gemini' → GeminiProvider."""
+        settings = _make_llm_settings(provider="gemini")
+        provider = create_provider(settings)
+        assert isinstance(provider, GeminiProvider)
+
+    def test_unknown_provider_raises(self):
+        """Неизвестный провайдер — ValueError."""
+        settings = _make_llm_settings()
+        # Подменяем provider через model_copy
+        bad_settings = settings.model_copy(update={"provider": "unknown"})
+        with pytest.raises(ValueError, match="Неизвестный LLM-провайдер"):
+            create_provider(bad_settings)
+
+    def test_provider_receives_settings(self):
+        """Провайдер получает настройки из LLMSettings."""
+        settings = _make_llm_settings(model_name="my-model")
+        provider = create_provider(settings)
+        assert provider.model_name == "my-model"
+
+
+# ── RagService._llm_func ─────────────────────────────────
+
+
+class TestRagServiceLLMFunc:
+    """Тесты RagService._llm_func: rate limiting + retry."""
+
+    async def test_successful_call(self):
+        """Успешный вызов — provider.complete вызывается один раз."""
+        service = _make_service()
+
+        result = await service._llm_func("test prompt")
 
         assert result == "LLM response"
-        mock_complete.assert_awaited_once()
-        mock_rate.assert_awaited()
+        service._provider.complete.assert_awaited_once()
+        service._wait_llm_rate.assert_awaited()
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_passes_all_parameters(self, mock_key, mock_complete, mock_rate):
-        """Все параметры передаются в gemini_model_complete."""
-        mock_complete.return_value = "ok"
+    async def test_passes_all_parameters(self):
+        """Все параметры передаются в provider.complete."""
+        service = _make_service()
 
-        await _llm_model_func(
+        await service._llm_func(
             "prompt",
             system_prompt="system",
             history_messages=[{"role": "user", "content": "hi"}],
             keyword_extraction=True,
         )
 
-        call_kwargs = mock_complete.call_args
-        assert call_kwargs[0][0] == "prompt"
-        assert call_kwargs[1]["system_prompt"] == "system"
-        assert call_kwargs[1]["history_messages"] == [{"role": "user", "content": "hi"}]
-        assert call_kwargs[1]["keyword_extraction"] is True
-        assert call_kwargs[1]["api_key"] == "test-key"
-
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_default_history_messages_is_empty_list(self, mock_key, mock_complete, mock_rate):
-        """Без history_messages передаётся пустой список."""
-        mock_complete.return_value = "ok"
-
-        await _llm_model_func("prompt")
-
-        call_kwargs = mock_complete.call_args[1]
-        assert call_kwargs["history_messages"] == []
+        call_kwargs = service._provider.complete.call_args[1]
+        assert call_kwargs["system_prompt"] == "system"
+        assert call_kwargs["history_messages"] == [{"role": "user", "content": "hi"}]
+        assert call_kwargs["keyword_extraction"] is True
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_on_429(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_retry_on_429(self, mock_sleep):
         """429 ошибка → retry с задержкой, затем успех."""
-        mock_complete.side_effect = [
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("429 Resource Exhausted"),
             "success after retry",
         ]
 
-        result = await _llm_model_func("prompt")
+        result = await service._llm_func("prompt")
 
         assert result == "success after retry"
-        assert mock_complete.await_count == 2
+        assert service._provider.complete.await_count == 2
         mock_sleep.assert_awaited()
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_on_resource_exhausted(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_retry_on_resource_exhausted(self, mock_sleep):
         """RESOURCE_EXHAUSTED → retry."""
-        mock_complete.side_effect = [
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("RESOURCE_EXHAUSTED"),
             "ok",
         ]
 
-        result = await _llm_model_func("prompt")
+        result = await service._llm_func("prompt")
         assert result == "ok"
-        assert mock_complete.await_count == 2
+        assert service._provider.complete.await_count == 2
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_non_429_error_raises_immediately(self, mock_key, mock_complete, mock_rate):
+    async def test_non_429_error_raises_immediately(self):
         """Не-429 ошибка поднимается сразу без retry."""
-        mock_complete.side_effect = ValueError("invalid model")
+        service = _make_service()
+        service._provider.complete.side_effect = ValueError("invalid model")
 
         with pytest.raises(ValueError, match="invalid model"):
-            await _llm_model_func("prompt")
+            await service._llm_func("prompt")
 
-        assert mock_complete.await_count == 1
+        assert service._provider.complete.await_count == 1
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_parses_retry_delay(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_retry_parses_retry_delay(self, mock_sleep):
         """retryDelay в сообщении ошибки парсится и используется для ожидания."""
-        mock_complete.side_effect = [
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("429 retryDelay: 10 seconds"),
             "ok",
         ]
 
-        result = await _llm_model_func("prompt")
+        result = await service._llm_func("prompt")
         assert result == "ok"
         # sleep вызван с parsed delay (10 + 2 = 12.0)
         sleep_arg = mock_sleep.call_args[0][0]
         assert sleep_arg == 12.0
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_max_retries_then_last_attempt(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_max_retries_then_last_attempt(self, mock_sleep):
         """5 retry-ошибок 429 → финальная (6-я) попытка без перехвата."""
-        mock_complete.side_effect = [
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("429"),
             Exception("429"),
             Exception("429"),
@@ -205,32 +334,27 @@ class TestLLMModelFunc:
             "final success",
         ]
 
-        result = await _llm_model_func("prompt")
+        result = await service._llm_func("prompt")
         assert result == "final success"
-        assert mock_complete.await_count == 6  # 5 retries + 1 final
+        assert service._provider.complete.await_count == 6  # 5 retries + 1 final
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_all_retries_exhausted_raises(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_all_retries_exhausted_raises(self, mock_sleep):
         """Все попытки исчерпаны → последняя ошибка поднимается."""
-        mock_complete.side_effect = Exception("429 limit exceeded")
+        service = _make_service()
+        service._provider.complete.side_effect = Exception("429 limit exceeded")
 
         with pytest.raises(Exception, match="429"):
-            await _llm_model_func("prompt")
+            await service._llm_func("prompt")
 
         # 5 в цикле + 1 финальная = 6
-        assert mock_complete.await_count == 6
+        assert service._provider.complete.await_count == 6
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_wait_capped_at_90(self, mock_key, mock_complete, mock_rate, mock_sleep):
-        """Задержка при retry ограничена 90 секундами (min(15*attempt, 90))."""
-        # 429 без retryDelay — используется формула min(15*attempt, 90)
-        mock_complete.side_effect = [
+    async def test_retry_wait_capped_at_max_delay(self, mock_sleep):
+        """Задержка при retry ограничена llm_retry_max_delay (90с)."""
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("429"),
             Exception("429"),
             Exception("429"),
@@ -239,10 +363,9 @@ class TestLLMModelFunc:
             "ok",
         ]
 
-        await _llm_model_func("prompt")
+        await service._llm_func("prompt")
 
-        # attempt=5: min(15*5, 90) = 75, не 90
-        # attempt=1: min(15, 90) = 15
+        # base_delay=15, formula: min(15*attempt, 90)
         sleep_calls = [c[0][0] for c in mock_sleep.call_args_list]
         assert sleep_calls[0] == 15.0  # attempt 1
         assert sleep_calls[1] == 30.0  # attempt 2
@@ -251,186 +374,155 @@ class TestLLMModelFunc:
         assert sleep_calls[4] == 75.0  # attempt 5
 
 
-# ── Embedding Function ────────────────────────────────────
+# ── RagService._embed_func ───────────────────────────────
 
 
-class TestEmbeddingFuncImpl:
-    """Тесты _embedding_func_impl: retry, parameter passing."""
+class TestRagServiceEmbedFunc:
+    """Тесты RagService._embed_func: rate limiting + retry."""
 
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_successful_call(self, mock_key, mock_embed, mock_rate):
+    async def test_successful_call(self):
         """Успешный вызов возвращает numpy массив."""
+        service = _make_service()
         expected = np.array([[0.1, 0.2, 0.3]])
-        mock_embed.func = AsyncMock(return_value=expected)
+        service._provider.embed.return_value = expected
 
-        result = await _embedding_func_impl(["test text"])
+        result = await service._embed_func(["test text"])
 
         np.testing.assert_array_equal(result, expected)
-        mock_embed.func.assert_awaited_once()
+        service._provider.embed.assert_awaited_once()
 
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_passes_correct_parameters(self, mock_key, mock_embed, mock_rate):
-        """Передаёт api_key, model, embedding_dim."""
-        mock_embed.func = AsyncMock(return_value=np.array([[0.0]]))
-
-        await _embedding_func_impl(["hello"])
-
-        call_kwargs = mock_embed.func.call_args[1]
-        assert call_kwargs["api_key"] == "test-key"
-        # model и embedding_dim берутся из settings
-
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_passes_texts_list(self, mock_key, mock_embed, mock_rate):
-        """Список текстов передаётся как первый аргумент."""
-        mock_embed.func = AsyncMock(return_value=np.array([[0.0]]))
+    async def test_passes_texts_list(self):
+        """Список текстов передаётся в provider.embed."""
+        service = _make_service()
         texts = ["text1", "text2", "text3"]
 
-        await _embedding_func_impl(texts)
+        await service._embed_func(texts)
 
-        call_args = mock_embed.func.call_args[0]
-        assert call_args[0] == texts
+        service._provider.embed.assert_awaited_once_with(texts)
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_on_429(self, mock_key, mock_embed, mock_rate, mock_sleep):
+    async def test_retry_on_429(self, mock_sleep):
         """429 ошибка → retry, затем успех."""
-        mock_embed.func = AsyncMock(
-            side_effect=[
-                Exception("429 RESOURCE_EXHAUSTED"),
-                np.array([[0.5, 0.5]]),
-            ]
-        )
+        service = _make_service()
+        service._provider.embed.side_effect = [
+            Exception("429 RESOURCE_EXHAUSTED"),
+            np.array([[0.5, 0.5]]),
+        ]
 
-        result = await _embedding_func_impl(["text"])
+        result = await service._embed_func(["text"])
 
         np.testing.assert_array_equal(result, np.array([[0.5, 0.5]]))
-        assert mock_embed.func.await_count == 2
+        assert service._provider.embed.await_count == 2
         mock_sleep.assert_awaited()
 
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_non_429_error_raises_immediately(self, mock_key, mock_embed, mock_rate):
+    async def test_non_429_error_raises_immediately(self):
         """Не-429 ошибка поднимается без retry."""
-        mock_embed.func = AsyncMock(side_effect=ValueError("bad input"))
+        service = _make_service()
+        service._provider.embed.side_effect = ValueError("bad input")
 
         with pytest.raises(ValueError, match="bad input"):
-            await _embedding_func_impl(["text"])
+            await service._embed_func(["text"])
 
-        assert mock_embed.func.await_count == 1
+        assert service._provider.embed.await_count == 1
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_parses_retry_delay(self, mock_key, mock_embed, mock_rate, mock_sleep):
+    async def test_retry_parses_retry_delay(self, mock_sleep):
         """retryDelay в ошибке парсится."""
-        mock_embed.func = AsyncMock(
-            side_effect=[
-                Exception("429 retryDelay: 20 seconds"),
-                np.array([[0.0]]),
-            ]
-        )
+        service = _make_service()
+        service._provider.embed.side_effect = [
+            Exception("429 retryDelay: 20 seconds"),
+            np.array([[0.0]]),
+        ]
 
-        await _embedding_func_impl(["text"])
+        await service._embed_func(["text"])
 
         sleep_arg = mock_sleep.call_args[0][0]
         assert sleep_arg == 22.0  # 20 + 2
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_all_retries_exhausted_raises(self, mock_key, mock_embed, mock_rate, mock_sleep):
+    async def test_all_retries_exhausted_raises(self, mock_sleep):
         """Все 5 retry + финальная попытка → исключение."""
-        mock_embed.func = AsyncMock(side_effect=Exception("429"))
+        service = _make_service()
+        service._provider.embed.side_effect = Exception("429")
 
         with pytest.raises(Exception, match="429"):
-            await _embedding_func_impl(["text"])
+            await service._embed_func(["text"])
 
         # 5 в цикле + 1 финальная = 6
-        assert mock_embed.func.await_count == 6
+        assert service._provider.embed.await_count == 6
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_retry_wait_capped_at_120(self, mock_key, mock_embed, mock_rate, mock_sleep):
-        """Задержка embedding retry ограничена 120 секундами (min(30*attempt, 120))."""
-        mock_embed.func = AsyncMock(
-            side_effect=[
-                Exception("429"),
-                Exception("429"),
-                Exception("429"),
-                Exception("429"),
-                Exception("429"),
-                np.array([[0.0]]),
-            ]
-        )
+    async def test_retry_wait_capped_at_max_delay(self, mock_sleep):
+        """Задержка embedding retry ограничена embed_retry_max_delay (120с)."""
+        service = _make_service()
+        service._provider.embed.side_effect = [
+            Exception("429"),
+            Exception("429"),
+            Exception("429"),
+            Exception("429"),
+            Exception("429"),
+            np.array([[0.0]]),
+        ]
 
-        await _embedding_func_impl(["text"])
+        await service._embed_func(["text"])
 
+        # base_delay=30, formula: min(30*attempt, 120)
         sleep_calls = [c[0][0] for c in mock_sleep.call_args_list]
-        assert sleep_calls[0] == 30.0   # attempt 1: min(30, 120)
-        assert sleep_calls[1] == 60.0   # attempt 2: min(60, 120)
-        assert sleep_calls[2] == 90.0   # attempt 3: min(90, 120)
-        assert sleep_calls[3] == 120.0  # attempt 4: min(120, 120)
-        assert sleep_calls[4] == 120.0  # attempt 5: min(150, 120) → 120
+        assert sleep_calls[0] == 30.0   # attempt 1
+        assert sleep_calls[1] == 60.0   # attempt 2
+        assert sleep_calls[2] == 90.0   # attempt 3
+        assert sleep_calls[3] == 120.0  # attempt 4
+        assert sleep_calls[4] == 120.0  # attempt 5: min(150, 120)
 
-    @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_multiple_texts_embedding(self, mock_key, mock_embed, mock_rate, mock_sleep):
+    async def test_multiple_texts_embedding(self):
         """Батч из нескольких текстов обрабатывается как один вызов."""
+        service = _make_service()
         expected = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]])
-        mock_embed.func = AsyncMock(return_value=expected)
+        service._provider.embed.return_value = expected
 
-        result = await _embedding_func_impl(["text1", "text2", "text3"])
+        result = await service._embed_func(["text1", "text2", "text3"])
 
         np.testing.assert_array_equal(result, expected)
-        mock_embed.func.assert_awaited_once()
+        service._provider.embed.assert_awaited_once()
 
 
 # ── _build_embedding_func ────────────────────────────────
 
 
 class TestBuildEmbeddingFunc:
-    """Тесты _build_embedding_func."""
+    """Тесты RagService._build_embedding_func."""
 
     async def test_returns_embedding_func(self):
         """Возвращает EmbeddingFunc с правильными атрибутами."""
         from lightrag.utils import EmbeddingFunc
 
-        func = _build_embedding_func()
+        service = _make_service()
+        func = service._build_embedding_func()
 
         assert isinstance(func, EmbeddingFunc)
 
-    async def test_embedding_dim_from_settings(self):
-        """embedding_dim берётся из settings."""
-        from src.core.config import settings
+    async def test_embedding_dim_from_provider(self):
+        """embedding_dim берётся из провайдера."""
+        provider = _make_mock_provider()
+        provider.embedding_dim = 1024
+        service = _make_service(provider)
 
-        func = _build_embedding_func()
-        assert func.embedding_dim == settings.llm.embedding_dim
+        func = service._build_embedding_func()
+        assert func.embedding_dim == 1024
 
-    async def test_max_token_size_from_settings(self):
-        """max_token_size берётся из settings."""
-        from src.core.config import settings
+    async def test_max_token_size_from_provider(self):
+        """max_token_size берётся из провайдера."""
+        provider = _make_mock_provider()
+        provider.max_token_size = 4096
+        service = _make_service(provider)
 
-        func = _build_embedding_func()
-        assert func.max_token_size == settings.llm.max_token_size
+        func = service._build_embedding_func()
+        assert func.max_token_size == 4096
 
     async def test_func_is_callable(self):
-        """Внутренняя функция — callable."""
-        func = _build_embedding_func()
+        """Внутренняя функция — callable (bound method _embed_func)."""
+        service = _make_service()
+        func = service._build_embedding_func()
         assert callable(func.func)
 
 
@@ -452,89 +544,75 @@ class TestGetRagServiceSingleton:
         assert s1 is s2
 
 
-# ── LLM Model Func: edge cases ───────────────────────────
+# ── Edge Cases ────────────────────────────────────────────
 
 
-class TestLLMModelFuncEdgeCases:
-    """Дополнительные edge-case тесты."""
+class TestRagServiceWrapperEdgeCases:
+    """Дополнительные edge-case тесты для LLM/Embed wrappers."""
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_empty_prompt(self, mock_key, mock_complete, mock_rate):
+    async def test_empty_prompt(self):
         """Пустой промпт всё равно передаётся."""
-        mock_complete.return_value = ""
+        service = _make_service()
+        service._provider.complete.return_value = ""
 
-        result = await _llm_model_func("")
+        result = await service._llm_func("")
         assert result == ""
-        assert mock_complete.call_args[0][0] == ""
+        assert service._provider.complete.call_args[0][0] == ""
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_long_prompt(self, mock_key, mock_complete, mock_rate):
+    async def test_long_prompt(self):
         """Длинный промпт передаётся без обрезки."""
+        service = _make_service()
         long_prompt = "x" * 100_000
-        mock_complete.return_value = "ok"
+        service._provider.complete.return_value = "ok"
 
-        await _llm_model_func(long_prompt)
-        assert mock_complete.call_args[0][0] == long_prompt
+        await service._llm_func(long_prompt)
+        assert service._provider.complete.call_args[0][0] == long_prompt
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_unicode_prompt(self, mock_key, mock_complete, mock_rate):
+    async def test_unicode_prompt(self):
         """Unicode-промпт на разных языках."""
+        service = _make_service()
         prompt = "Привет 你好 مرحبا"
-        mock_complete.return_value = "ответ"
+        service._provider.complete.return_value = "ответ"
 
-        result = await _llm_model_func(prompt)
+        result = await service._llm_func(prompt)
         assert result == "ответ"
-        assert mock_complete.call_args[0][0] == prompt
+        assert service._provider.complete.call_args[0][0] == prompt
 
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_extra_kwargs_passed_through(self, mock_key, mock_complete, mock_rate):
-        """Дополнительные kwargs пробрасываются в gemini_model_complete."""
-        mock_complete.return_value = "ok"
+    async def test_extra_kwargs_passed_through(self):
+        """Дополнительные kwargs пробрасываются в provider.complete."""
+        service = _make_service()
+        service._provider.complete.return_value = "ok"
 
-        await _llm_model_func("prompt", temperature=0.5, top_k=40)
+        await service._llm_func("prompt", temperature=0.5, top_k=40)
 
-        call_kwargs = mock_complete.call_args[1]
+        call_kwargs = service._provider.complete.call_args[1]
         assert call_kwargs["temperature"] == 0.5
         assert call_kwargs["top_k"] == 40
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_llm_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_model_complete", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_429_then_non_429_error(self, mock_key, mock_complete, mock_rate, mock_sleep):
+    async def test_429_then_non_429_error(self, mock_sleep):
         """Сначала 429, потом другая ошибка → вторая ошибка поднимается."""
-        mock_complete.side_effect = [
+        service = _make_service()
+        service._provider.complete.side_effect = [
             Exception("429"),
             TypeError("wrong type"),
         ]
 
         with pytest.raises(TypeError, match="wrong type"):
-            await _llm_model_func("prompt")
+            await service._llm_func("prompt")
 
-        assert mock_complete.await_count == 2
+        assert service._provider.complete.await_count == 2
 
     @patch("src.modules.rag.services.asyncio.sleep", new_callable=AsyncMock)
-    @patch("src.modules.rag.services._wait_embed_rate", new_callable=AsyncMock)
-    @patch("src.modules.rag.services.gemini_embed")
-    @patch("src.modules.rag.services._get_api_key", return_value="test-key")
-    async def test_embed_429_then_other_error(self, mock_key, mock_embed, mock_rate, mock_sleep):
+    async def test_embed_429_then_other_error(self, mock_sleep):
         """Embedding: 429, потом другая ошибка."""
-        mock_embed.func = AsyncMock(
-            side_effect=[
-                Exception("RESOURCE_EXHAUSTED"),
-                RuntimeError("connection lost"),
-            ]
-        )
+        service = _make_service()
+        service._provider.embed.side_effect = [
+            Exception("RESOURCE_EXHAUSTED"),
+            RuntimeError("connection lost"),
+        ]
 
         with pytest.raises(RuntimeError, match="connection lost"):
-            await _embedding_func_impl(["text"])
+            await service._embed_func(["text"])
 
-        assert mock_embed.func.await_count == 2
+        assert service._provider.embed.await_count == 2

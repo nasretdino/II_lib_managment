@@ -1,16 +1,14 @@
 """
 RagService — обёртка над LightRAG для индексации и поиска.
 
-Использует Gemini для LLM-генерации и эмбеддингов.
+Провайдер-агностичная реализация: конкретный LLM-провайдер
+(Gemini, OpenAI, etc.) подключается через LLMProvider.
 PostgreSQL (pgvector) — единое хранилище для графа, векторов, KV и статусов.
-LightRAG берёт на себя:
-  - Построение графа знаний (сущности + связи)
-  - Создание эмбеддингов и их хранение
-  - Гибридный поиск: vector similarity + graph traversal
 """
 
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 
@@ -18,18 +16,16 @@ import numpy as np
 from loguru import logger
 
 from lightrag import LightRAG, QueryParam
-from lightrag.llm.gemini import gemini_model_complete, gemini_embed
 from lightrag.utils import EmbeddingFunc
 
 from src.core.config import settings
+from .llm_provider import LLMProvider, create_provider
 from .schemas import SearchResult, IndexResult
 
 WORKING_DIR = Path("rag_storage")
 
+
 # ── Rate Limiter ──────────────────────────────────────────
-# Gemini free tier лимиты (скользящее окно 60 с):
-#   - embed_content:    100 req/min → ставим 80
-#   - generate_content:  20 req/min → ставим 15
 
 
 def _make_rate_limiter(limit: int, window: float = 60.0):
@@ -54,114 +50,9 @@ def _make_rate_limiter(limit: int, window: float = 60.0):
     return wait
 
 
-_wait_embed_rate = _make_rate_limiter(80)
-_wait_llm_rate = _make_rate_limiter(15)
-
-
-def _get_api_key() -> str:
-    return settings.llm.gemini_api_key.get_secret_value()
-
-
-async def _llm_model_func(
-    prompt: str,
-    system_prompt: str | None = None,
-    history_messages: list | None = None,
-    keyword_extraction: bool = False,
-    **kwargs,
-) -> str:
-    """LLM-функция для LightRAG на базе Gemini с rate limiting и retry."""
-    import re as _re
-
-    max_retries = 5
-    for attempt in range(1, max_retries + 1):
-        await _wait_llm_rate()
-        try:
-            return await gemini_model_complete(
-                prompt,
-                system_prompt=system_prompt,
-                history_messages=history_messages or [],
-                keyword_extraction=keyword_extraction,
-                api_key=_get_api_key(),
-                model_name=settings.llm.model_name,
-                **kwargs,
-            )
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                wait = min(15.0 * attempt, 90.0)
-                match = _re.search(r"retryDelay.*?(\d+)", err_msg)
-                if match:
-                    wait = float(match.group(1)) + 2.0
-                logger.warning(
-                    "LLM 429: попытка {}/{}, ожидание {:.0f}с",
-                    attempt, max_retries, wait,
-                )
-                await asyncio.sleep(wait)
-            else:
-                raise
-    # Последняя попытка — без перехвата
-    await _wait_llm_rate()
-    return await gemini_model_complete(
-        prompt,
-        system_prompt=system_prompt,
-        history_messages=history_messages or [],
-        keyword_extraction=keyword_extraction,
-        api_key=_get_api_key(),
-        model_name=settings.llm.model_name,
-        **kwargs,
-    )
-
-
-async def _embedding_func_impl(texts: list[str]) -> np.ndarray:
-    """Embedding-функция для LightRAG на базе Gemini с rate limiting и retry."""
-    import re as _re
-
-    max_retries = 5
-    for attempt in range(1, max_retries + 1):
-        await _wait_embed_rate()
-        try:
-            return await gemini_embed.func(
-                texts,
-                api_key=_get_api_key(),
-                model=settings.llm.embedding_model,
-                embedding_dim=settings.llm.embedding_dim,
-            )
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                wait = min(30.0 * attempt, 120.0)
-                match = _re.search(r"retryDelay.*?(\d+)", err_msg)
-                if match:
-                    wait = float(match.group(1)) + 2.0
-                logger.warning(
-                    "Embedding 429: попытка {}/{}, ожидание {:.0f}с",
-                    attempt, max_retries, wait,
-                )
-                await asyncio.sleep(wait)
-            else:
-                raise
-    # Последняя попытка — без перехвата
-    await _wait_embed_rate()
-    return await gemini_embed.func(
-        texts,
-        api_key=_get_api_key(),
-        model=settings.llm.embedding_model,
-        embedding_dim=settings.llm.embedding_dim,
-    )
-
-
-def _build_embedding_func() -> EmbeddingFunc:
-    """Создать EmbeddingFunc с правильными атрибутами."""
-    return EmbeddingFunc(
-        embedding_dim=settings.llm.embedding_dim,
-        max_token_size=settings.llm.max_token_size,
-        func=_embedding_func_impl,
-    )
-
-
 class RagService:
     """
-    Тонкая обёртка над LightRAG c PostgreSQL-хранилищем.
+    Обёртка над LightRAG, провайдер-агностичная.
 
     Жизненный цикл:
       1. initialize() — создать экземпляр LightRAG и инициализировать хранилища
@@ -171,8 +62,19 @@ class RagService:
       5. shutdown() — корректно завершить работу
     """
 
-    def __init__(self) -> None:
+    def __init__(self, provider: LLMProvider) -> None:
         self._rag: LightRAG | None = None
+        self._provider = provider
+
+        # Rate limiters из конфига
+        self._wait_llm_rate = _make_rate_limiter(
+            settings.llm.llm_rate_limit,
+            settings.llm.rate_limit_window,
+        )
+        self._wait_embed_rate = _make_rate_limiter(
+            settings.llm.embed_rate_limit,
+            settings.llm.rate_limit_window,
+        )
 
     @property
     def rag(self) -> LightRAG:
@@ -182,37 +84,121 @@ class RagService:
             )
         return self._rag
 
+    # ── LLM wrapper (rate limit + retry) ──────────────────
+
+    async def _llm_func(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        history_messages: list | None = None,
+        keyword_extraction: bool = False,
+        **kwargs,
+    ) -> str:
+        """Rate-limited + retry обёртка над provider.complete()."""
+        max_retries = settings.llm.max_retries
+        for attempt in range(1, max_retries + 1):
+            await self._wait_llm_rate()
+            try:
+                return await self._provider.complete(
+                    prompt,
+                    system_prompt=system_prompt,
+                    history_messages=history_messages,
+                    keyword_extraction=keyword_extraction,
+                    **kwargs,
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    wait = min(
+                        settings.llm.llm_retry_base_delay * attempt,
+                        settings.llm.llm_retry_max_delay,
+                    )
+                    match = re.search(r"retryDelay.*?(\d+)", err_msg)
+                    if match:
+                        wait = float(match.group(1)) + 2.0
+                    logger.warning(
+                        "LLM 429: попытка {}/{}, ожидание {:.0f}с",
+                        attempt, max_retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
+        # Последняя попытка — без перехвата
+        await self._wait_llm_rate()
+        return await self._provider.complete(
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages,
+            keyword_extraction=keyword_extraction,
+            **kwargs,
+        )
+
+    async def _embed_func(self, texts: list[str]) -> np.ndarray:
+        """Rate-limited + retry обёртка над provider.embed()."""
+        max_retries = settings.llm.max_retries
+        for attempt in range(1, max_retries + 1):
+            await self._wait_embed_rate()
+            try:
+                return await self._provider.embed(texts)
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    wait = min(
+                        settings.llm.embed_retry_base_delay * attempt,
+                        settings.llm.embed_retry_max_delay,
+                    )
+                    match = re.search(r"retryDelay.*?(\d+)", err_msg)
+                    if match:
+                        wait = float(match.group(1)) + 2.0
+                    logger.warning(
+                        "Embedding 429: попытка {}/{}, ожидание {:.0f}с",
+                        attempt, max_retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
+        # Последняя попытка — без перехвата
+        await self._wait_embed_rate()
+        return await self._provider.embed(texts)
+
+    def _build_embedding_func(self) -> EmbeddingFunc:
+        """Создать EmbeddingFunc для LightRAG."""
+        return EmbeddingFunc(
+            embedding_dim=self._provider.embedding_dim,
+            max_token_size=self._provider.max_token_size,
+            func=self._embed_func,
+        )
+
+    # ── Lifecycle ─────────────────────────────────────────
+
     async def initialize(self) -> None:
-        """Создать экземпляр LightRAG и инициализировать хранилища в PostgreSQL."""
+        """Создать экземпляр LightRAG и инициализировать хранилища."""
         working_dir = str(WORKING_DIR)
         os.makedirs(working_dir, exist_ok=True)
 
         self._rag = LightRAG(
             working_dir=working_dir,
-            # Изоляция данных
             workspace=settings.llm.workspace,
-            # LLM
-            llm_model_func=_llm_model_func,
-            llm_model_name=settings.llm.model_name,
-            # Эмбеддинги
-            embedding_func=_build_embedding_func(),
-            # Хранилища
+            llm_model_func=self._llm_func,
+            llm_model_name=self._provider.model_name,
+            embedding_func=self._build_embedding_func(),
             kv_storage="PGKVStorage",
             vector_storage="PGVectorStorage",
-            graph_storage="NetworkXStorage",  # AGE extension недоступна для PG17
+            graph_storage="NetworkXStorage",
             doc_status_storage="PGDocStatusStorage",
-            # Чанкинг (LightRAG сам разбивает текст)
             chunk_token_size=settings.llm.chunk_token_size,
             chunk_overlap_token_size=settings.llm.chunk_overlap_token_size,
-            # Производительность — Gemini free tier: 20 LLM req/min, 100 embed req/min
             max_parallel_insert=1,
         )
 
         await self._rag.initialize_storages()
         logger.info(
-            "RagService инициализирован (model={}, embedding={}, storage=PostgreSQL, workspace={})",
-            settings.llm.model_name,
-            settings.llm.embedding_model,
+            "RagService инициализирован (provider={}, model={}, embedding={}, workspace={})",
+            settings.llm.provider,
+            self._provider.model_name,
+            self._provider.embedding_model,
             settings.llm.workspace,
         )
 
@@ -334,5 +320,6 @@ def get_rag_service() -> RagService:
     """Получить глобальный экземпляр RagService (singleton)."""
     global _rag_service
     if _rag_service is None:
-        _rag_service = RagService()
+        provider = create_provider(settings.llm)
+        _rag_service = RagService(provider)
     return _rag_service
