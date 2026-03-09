@@ -226,7 +226,7 @@ location /chat/stream {
         │   ├── parser.py        # Парсинг файлов через MarkItDown / PyMuPDF
         │   └── chunking.py      # Разбиение на чанки (Semantic Router / text_splitter)
         │
-        ├── rag/                 # LightRAG: индексация и поиск
+        ├── rag/                 # ✅ Готов — LightRAG: индексация и поиск
         │   ├── __init__.py
         │   ├── schemas.py       # SearchResult, ChunkRead
         │   ├── services.py      # RagService — обёртка над LightRAG
