@@ -18,6 +18,7 @@ class UserDAO(BaseDAO[User]):
     ) -> Sequence[User]:
         """Case-insensitive partial-match filtering for name."""
         expressions = []
+        
         if filters.name:
             expressions.append(func.lower(User.name).contains(filters.name.lower()))
         return await self.find_all(

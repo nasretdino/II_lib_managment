@@ -24,6 +24,7 @@ async def search_knowledge_base(
     rag: Annotated[RagService, Depends(get_rag)],
 ):
     """
+    
     Поиск по базе знаний через LightRAG.
 
     Режимы:
