@@ -27,6 +27,8 @@ class AnalystNode:
             return f"google-gla:{settings.llm.model_name}"
 
         if settings.llm.provider == "ollama":
+            if "OLLAMA_BASE_URL" not in os.environ:
+                os.environ["OLLAMA_BASE_URL"] = settings.llm.ollama_host
             return f"ollama:{settings.llm.model_name}"
 
         return settings.llm.model_name

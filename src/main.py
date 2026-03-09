@@ -18,7 +18,7 @@ from src.core import (
     get_logger,
 )
 from src.db import engine
-from src.modules import user_router, document_router, rag_router, agents_router
+from src.modules import user_router, document_router, rag_router, agents_router, chat_router
 from src.modules.rag.services import get_rag_service
 
 # ── Logging ───────────────────────────────────────────────
@@ -194,4 +194,5 @@ app.include_router(user_router)
 app.include_router(document_router)
 app.include_router(rag_router)
 app.include_router(agents_router)
+app.include_router(chat_router)
 

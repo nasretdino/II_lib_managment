@@ -11,4 +11,4 @@ RUN poetry config virtualenvs.create false \
 
 COPY . .
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "-c", "gunicorn_conf.py", "src.main:app"]
