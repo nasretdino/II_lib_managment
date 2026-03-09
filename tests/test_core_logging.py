@@ -49,3 +49,12 @@ class TestSetupLogging:
         logger.info("prod-info-message")
         captured = capsys.readouterr()
         assert "prod-info-message" in captured.err
+
+    def test_contextualize_propagates_request_id(self, capsys):
+        """request_id из contextualize попадает в формат логов."""
+        setup_logging("dev")
+        with logger.contextualize(request_id="rid-ctx-123"):
+            logger.info("context-aware-log")
+        captured = capsys.readouterr()
+        assert "context-aware-log" in captured.err
+        assert "rid-ctx-123" in captured.err

@@ -1,9 +1,11 @@
 import asyncio
 from pathlib import Path
 
-from loguru import logger
-
+from src.core import get_logger
 from src.core.exceptions import DocumentParsingError
+
+
+logger = get_logger(module="documents", component="parser")
 
 
 async def extract_text(file_path: str, content_type: str) -> str:

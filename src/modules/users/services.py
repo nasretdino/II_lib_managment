@@ -1,12 +1,14 @@
 from datetime import datetime, timezone
 
-from loguru import logger
-
+from src.core import get_logger
 from src.core.exceptions import NotFoundError
 
 from .dao import UserDAO
 from .models import User
 from .schemas import UserCreate, UserFilter, UserUpdate
+
+
+logger = get_logger(module="users", component="service")
 
 
 class UserService:

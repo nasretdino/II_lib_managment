@@ -4,11 +4,14 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
-from loguru import logger
 from minio import Minio
 from minio.error import S3Error
 
+from src.core import get_logger
 from src.core.config import settings
+
+
+logger = get_logger(module="documents", component="storage")
 
 
 class ObjectStorageError(RuntimeError):

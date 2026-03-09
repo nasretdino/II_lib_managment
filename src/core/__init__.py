@@ -6,12 +6,13 @@ from .exceptions import (
     LLMProviderError,
     NotFoundError,
 )
-from .logging import setup_logging
+from .logging import setup_logging, get_logger
 
 
 __all__ = [
     "settings",
     "setup_logging",
+    "get_logger",
     "NotFoundError",
     "ConflictError",
     "DocumentParsingError",

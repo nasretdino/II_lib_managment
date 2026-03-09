@@ -11,12 +11,13 @@ from sqlalchemy import (
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
-from loguru import logger
+from src.core import get_logger
 
 from .base_model import Base
 
 
 T = TypeVar("T", bound=Base)
+logger = get_logger(module="db", component="base_dao")
 
 
 class BaseDAO(Generic[T]):
@@ -35,7 +36,9 @@ class BaseDAO(Generic[T]):
             return record
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during primary key lookup for {self.model.__name__} (ID: {data_id})"
+                "Database error during primary key lookup: model={} id={}",
+                self.model.__name__,
+                data_id,
             )
             raise
 
@@ -73,7 +76,8 @@ class BaseDAO(Generic[T]):
             return result.scalars().all()
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during dynamic sequence retrieval for {self.model.__name__}"
+                "Database error during dynamic sequence retrieval: model={}",
+                self.model.__name__,
             )
             raise
 
@@ -92,7 +96,8 @@ class BaseDAO(Generic[T]):
             return new_instance
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during singular insertion for {self.model.__name__}"
+                "Database error during singular insertion: model={}",
+                self.model.__name__,
             )
             raise
 
@@ -120,7 +125,8 @@ class BaseDAO(Generic[T]):
                 return None
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during core bulk insertion for {self.model.__name__}"
+                "Database error during core bulk insertion: model={}",
+                self.model.__name__,
             )
             raise
 
@@ -157,7 +163,8 @@ class BaseDAO(Generic[T]):
             return result.rowcount
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during mutation for {self.model.__name__}"
+                "Database error during mutation: model={}",
+                self.model.__name__,
             )
             raise
 
@@ -187,6 +194,7 @@ class BaseDAO(Generic[T]):
             return result.rowcount
         except SQLAlchemyError:
             logger.exception(
-                f"Database error during deletion for {self.model.__name__}"
+                "Database error during deletion: model={}",
+                self.model.__name__,
             )
             raise

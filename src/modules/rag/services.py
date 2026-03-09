@@ -17,15 +17,18 @@ import time
 from pathlib import Path
 
 import numpy as np
-from loguru import logger
 
 from lightrag import LightRAG, QueryParam
 from lightrag.utils import EmbeddingFunc
 
+from src.core import get_logger
 from src.core.config import settings
 from src.core.exceptions import DailyQuotaExhaustedError
 from .llm_provider import LLMProvider, create_provider
 from .schemas import SearchResult, IndexResult
+
+
+logger = get_logger(module="rag", component="service")
 
 WORKING_DIR = Path("rag_storage")
 

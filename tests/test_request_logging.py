@@ -2,6 +2,9 @@ import io
 
 import pytest
 from httpx import AsyncClient
+from loguru import logger
+
+from src.core import settings, setup_logging
 
 
 pytestmark = pytest.mark.asyncio
@@ -38,3 +41,25 @@ class TestRequestIdMiddleware:
         assert resp.status_code == 422
         assert "x-request-id" in resp.headers
         assert resp.headers["x-request-id"]
+
+    async def test_request_id_is_present_in_application_logs(self, client: AsyncClient):
+        sent_request_id = "rid-log-123"
+        setup_logging("dev")
+
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, format="{message} | rid={extra[request_id]}")
+        try:
+            resp = await client.post(
+                "/users/",
+                json={"name": "LogCheckUser"},
+                headers={"X-Request-ID": sent_request_id},
+            )
+            assert resp.status_code == 201
+        finally:
+            logger.remove(sink_id)
+            setup_logging(settings.env)
+
+        assert any(
+            "Creating user name=LogCheckUser" in msg and f"rid={sent_request_id}" in msg
+            for msg in messages
+        )

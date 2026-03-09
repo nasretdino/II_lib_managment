@@ -4,7 +4,6 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from loguru import logger
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 
@@ -16,13 +15,16 @@ from src.core import (
     DocumentParsingError,
     LLMProviderError,
     NotFoundError,
+    get_logger,
 )
 from src.db import engine
-from src.modules import user_router, document_router, rag_router
+from src.modules import user_router, document_router, rag_router, agents_router
 from src.modules.rag.services import get_rag_service
 
 # ── Logging ───────────────────────────────────────────────
 setup_logging(settings.env)
+app_logger = get_logger(module="app", component="http")
+lifespan_logger = get_logger(module="app", component="lifespan")
 
 
 @asynccontextmanager
@@ -30,7 +32,7 @@ async def lifespan(app: FastAPI):
     # Инициализация LightRAG при старте
     rag = get_rag_service()
     await rag.initialize()
-    logger.info("LightRAG initialized")
+    lifespan_logger.info("LightRAG initialized")
 
     yield
 
@@ -52,29 +54,30 @@ async def request_logging_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or uuid4().hex
     request.state.request_id = request_id
 
-    bound_logger = logger.bind(request_id=request_id)
     started_at = time.perf_counter()
 
-    try:
-        response = await call_next(request)
-    except Exception:
+    with app_logger.contextualize(request_id=request_id):
+        try:
+            response = await call_next(request)
+        except Exception:
+            duration_ms = (time.perf_counter() - started_at) * 1000
+            app_logger.exception(
+                "HTTP request failed: method={} path={} duration_ms={:.2f}",
+                request.method,
+                request.url.path,
+                duration_ms,
+            )
+            raise
+
         duration_ms = (time.perf_counter() - started_at) * 1000
-        bound_logger.exception(
-            "HTTP request failed: {} {} in {:.2f}ms",
+        app_logger.info(
+            "HTTP request completed: method={} path={} status={} duration_ms={:.2f}",
             request.method,
             request.url.path,
+            response.status_code,
             duration_ms,
         )
-        raise
 
-    duration_ms = (time.perf_counter() - started_at) * 1000
-    bound_logger.info(
-        "HTTP {} {} -> {} ({:.2f}ms)",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms,
-    )
     response.headers["X-Request-ID"] = request_id
     return response
 
@@ -102,7 +105,7 @@ def _request_meta(request: Request) -> tuple[str, str]:
 @app.exception_handler(NotFoundError)
 async def not_found_handler(request: Request, exc: NotFoundError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).warning(
+    app_logger.warning(
         "NotFoundError on {} {}: {}",
         method,
         path,
@@ -114,7 +117,7 @@ async def not_found_handler(request: Request, exc: NotFoundError):
 @app.exception_handler(ConflictError)
 async def conflict_handler(request: Request, exc: ConflictError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).warning(
+    app_logger.warning(
         "ConflictError on {} {}: {}",
         method,
         path,
@@ -126,7 +129,7 @@ async def conflict_handler(request: Request, exc: ConflictError):
 @app.exception_handler(DocumentParsingError)
 async def document_parsing_handler(request: Request, exc: DocumentParsingError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).warning(
+    app_logger.warning(
         "DocumentParsingError on {} {}: {}",
         method,
         path,
@@ -138,7 +141,7 @@ async def document_parsing_handler(request: Request, exc: DocumentParsingError):
 @app.exception_handler(DailyQuotaExhaustedError)
 async def daily_quota_handler(request: Request, exc: DailyQuotaExhaustedError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).warning(
+    app_logger.warning(
         "DailyQuotaExhaustedError on {} {}",
         method,
         path,
@@ -154,7 +157,7 @@ async def daily_quota_handler(request: Request, exc: DailyQuotaExhaustedError):
 @app.exception_handler(LLMProviderError)
 async def llm_provider_handler(request: Request, exc: LLMProviderError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).error(
+    app_logger.error(
         "LLMProviderError on {} {}: {}",
         method,
         path,
@@ -166,7 +169,7 @@ async def llm_provider_handler(request: Request, exc: LLMProviderError):
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).error(
+    app_logger.exception(
         "Database error on {} {}: {}",
         method,
         path,
@@ -178,7 +181,7 @@ async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
 @app.exception_handler(Exception)
 async def generic_error_handler(request: Request, exc: Exception):
     method, path = _request_meta(request)
-    logger.bind(request_id=getattr(request.state, "request_id", "-")).exception(
+    app_logger.exception(
         "Unhandled error on {} {}",
         method,
         path,
@@ -190,4 +193,5 @@ async def generic_error_handler(request: Request, exc: Exception):
 app.include_router(user_router)
 app.include_router(document_router)
 app.include_router(rag_router)
+app.include_router(agents_router)
 

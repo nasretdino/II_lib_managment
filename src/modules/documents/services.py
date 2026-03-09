@@ -4,8 +4,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import UploadFile
-from loguru import logger
-
+from src.core import get_logger
 from src.core.exceptions import DailyQuotaExhaustedError, DocumentParsingError
 from src.modules.rag.services import RagService
 
@@ -14,6 +13,9 @@ from .dao import DocumentDAO
 from .models import Document
 from .parser import extract_text
 from .storage import MinioStorage, LocalStorage
+
+
+logger = get_logger(module="documents", component="service")
 
 
 class DocumentService:
