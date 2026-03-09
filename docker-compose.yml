@@ -51,18 +51,24 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   minio-init:
     image: minio/mc:RELEASE.2025-03-12T17-29-24Z
     depends_on:
       minio:
-        condition: service_started
+        condition: service_healthy
     environment:
       MINIO__ACCESS_KEY: ${MINIO__ACCESS_KEY:-minioadmin}
       MINIO__SECRET_KEY: ${MINIO__SECRET_KEY:-minioadmin}
       MINIO__BUCKET_NAME: ${MINIO__BUCKET_NAME:-documents}
     entrypoint: >
       /bin/sh -c "
+      set -e;
       mc alias set local http://minio:9000 $${MINIO__ACCESS_KEY} $${MINIO__SECRET_KEY};
       mc mb --ignore-existing local/$${MINIO__BUCKET_NAME};
       "
@@ -81,6 +87,8 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - rag_storage_data:/app/rag_storage
     depends_on:

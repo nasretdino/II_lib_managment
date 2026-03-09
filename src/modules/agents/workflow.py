@@ -40,6 +40,7 @@ def build_workflow(rag: RagService):
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "critique")
     graph.add_edge("critique", "decide")
+    
 
     graph.add_conditional_edges(
         "decide",

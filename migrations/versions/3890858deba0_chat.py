@@ -40,48 +40,23 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['session_id'], ['chat_sessions.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )
-    op.drop_index(op.f('idx_lightrag_vdb_entity_hnsw_cosine'), table_name='lightrag_vdb_entity', postgresql_ops={'content_vector': 'vector_cosine_ops'}, postgresql_with={'m': '16', 'ef_construction': '64'}, postgresql_using='hnsw')
-    op.drop_index(op.f('idx_lightrag_vdb_entity_id'), table_name='lightrag_vdb_entity')
-    op.drop_index(op.f('idx_lightrag_vdb_entity_workspace_id'), table_name='lightrag_vdb_entity')
-    op.drop_table('lightrag_vdb_entity')
-    op.drop_index(op.f('idx_lightrag_llm_cache_id'), table_name='lightrag_llm_cache')
-    op.drop_index(op.f('idx_lightrag_llm_cache_workspace_id'), table_name='lightrag_llm_cache')
-    op.drop_table('lightrag_llm_cache')
-    op.drop_index(op.f('idx_lightrag_relation_chunks_id'), table_name='lightrag_relation_chunks')
-    op.drop_index(op.f('idx_lightrag_relation_chunks_workspace_id'), table_name='lightrag_relation_chunks')
-    op.drop_table('lightrag_relation_chunks')
-    op.drop_index(op.f('idx_lightrag_doc_full_id'), table_name='lightrag_doc_full')
-    op.drop_index(op.f('idx_lightrag_doc_full_workspace_id'), table_name='lightrag_doc_full')
-    op.drop_table('lightrag_doc_full')
-    op.drop_index(op.f('idx_lightrag_full_entities_id'), table_name='lightrag_full_entities')
-    op.drop_index(op.f('idx_lightrag_full_entities_workspace_id'), table_name='lightrag_full_entities')
-    op.drop_table('lightrag_full_entities')
-    op.drop_index(op.f('idx_lightrag_doc_chunks_id'), table_name='lightrag_doc_chunks')
-    op.drop_index(op.f('idx_lightrag_doc_chunks_workspace_id'), table_name='lightrag_doc_chunks')
-    op.drop_table('lightrag_doc_chunks')
-    op.drop_index(op.f('idx_lightrag_entity_chunks_id'), table_name='lightrag_entity_chunks')
-    op.drop_index(op.f('idx_lightrag_entity_chunks_workspace_id'), table_name='lightrag_entity_chunks')
-    op.drop_table('lightrag_entity_chunks')
-    op.drop_index(op.f('idx_lightrag_doc_status_id'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_track_id'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_created_at'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_file_path'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_id'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_status_created_at'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_status_updated_at'), table_name='lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_doc_status_workspace_updated_at'), table_name='lightrag_doc_status')
-    op.drop_table('lightrag_doc_status')
-    op.drop_index(op.f('idx_lightrag_vdb_chunks_hnsw_cosine'), table_name='lightrag_vdb_chunks', postgresql_ops={'content_vector': 'vector_cosine_ops'}, postgresql_with={'m': '16', 'ef_construction': '64'}, postgresql_using='hnsw')
-    op.drop_index(op.f('idx_lightrag_vdb_chunks_id'), table_name='lightrag_vdb_chunks')
-    op.drop_index(op.f('idx_lightrag_vdb_chunks_workspace_id'), table_name='lightrag_vdb_chunks')
-    op.drop_table('lightrag_vdb_chunks')
-    op.drop_index(op.f('idx_lightrag_vdb_relation_hnsw_cosine'), table_name='lightrag_vdb_relation', postgresql_ops={'content_vector': 'vector_cosine_ops'}, postgresql_with={'m': '16', 'ef_construction': '64'}, postgresql_using='hnsw')
-    op.drop_index(op.f('idx_lightrag_vdb_relation_id'), table_name='lightrag_vdb_relation')
-    op.drop_index(op.f('idx_lightrag_vdb_relation_workspace_id'), table_name='lightrag_vdb_relation')
-    op.drop_table('lightrag_vdb_relation')
-    op.drop_index(op.f('idx_lightrag_full_relations_id'), table_name='lightrag_full_relations')
-    op.drop_index(op.f('idx_lightrag_full_relations_workspace_id'), table_name='lightrag_full_relations')
-    op.drop_table('lightrag_full_relations')
+    # В разных средах LightRAG может создавать разные индексы,
+    # поэтому безопасно удаляем только таблицы (с индексами каскадом).
+    lightrag_tables = (
+        'lightrag_vdb_entity',
+        'lightrag_llm_cache',
+        'lightrag_relation_chunks',
+        'lightrag_doc_full',
+        'lightrag_full_entities',
+        'lightrag_doc_chunks',
+        'lightrag_entity_chunks',
+        'lightrag_doc_status',
+        'lightrag_vdb_chunks',
+        'lightrag_vdb_relation',
+        'lightrag_full_relations',
+    )
+    for table_name in lightrag_tables:
+        op.execute(sa.text(f'DROP TABLE IF EXISTS "{table_name}" CASCADE'))
     # ### end Alembic commands ###
 
 

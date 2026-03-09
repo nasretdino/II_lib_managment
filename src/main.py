@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 import time
 from uuid import uuid4
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 
@@ -47,6 +49,11 @@ app = FastAPI(
     docs_url="/docs" if settings.env != "prod" else None,
     redoc_url="/redoc" if settings.env != "prod" else None,
 )
+
+frontend_dir = Path(__file__).resolve().parent / "frontend"
+assets_dir = frontend_dir / "assets"
+
+app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 
 @app.middleware("http")
@@ -190,6 +197,11 @@ async def generic_error_handler(request: Request, exc: Exception):
 
 
 # ── Routers ───────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def frontend_index() -> FileResponse:
+    return FileResponse(frontend_dir / "index.html")
+
+
 app.include_router(user_router)
 app.include_router(document_router)
 app.include_router(rag_router)

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>II Lib Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="bg-shape bg-shape-a"></div>
+  <div class="bg-shape bg-shape-b"></div>
+
+  <section id="auth-screen" class="auth-shell">
+    <form id="login-form" class="auth-card reveal" style="--delay: 0.05s;" novalidate>
+      <p class="eyebrow">II Lib Chat</p>
+      <h1>Вход</h1>
+      <p class="hero-copy">Введите имя. Если профиль уже есть, вы войдете в него. Если нет, создадим новый автоматически.</p>
+      <label for="login-name">Имя пользователя</label>
+      <input id="login-name" name="name" type="text" placeholder="Например: danil" autofocus />
+      <button type="submit">Войти</button>
+      <p id="auth-error" class="auth-error hidden"></p>
+    </form>
+  </section>
+
+  <main id="app-screen" class="layout hidden">
+    <header class="hero">
+      <p class="eyebrow">Документы + чат</p>
+      <h1>II Lib Chat</h1>
+      <div class="hero-row">
+        <p id="current-user" class="hero-copy"></p>
+        <button id="logout-btn" class="ghost">Выйти</button>
+      </div>
+    </header>
+
+    <section class="workspace reveal" style="--delay: 0.12s;">
+      <aside class="panel docs-panel">
+        <h2>Документы</h2>
+        <form id="upload-form" class="row row-wrap">
+          <label for="document-file">Файл</label>
+          <input id="document-file" name="file" type="file" required />
+          <button type="submit">Загрузить</button>
+        </form>
+        <div class="row">
+          <button id="refresh-docs" class="ghost">Обновить список</button>
+        </div>
+        <ul id="documents-list" class="list"></ul>
+      </aside>
+
+      <section class="panel chat-panel">
+        <h2>Чат по документам</h2>
+        <div class="row row-wrap">
+          <button id="new-chat-btn" class="ghost">Новый диалог</button>
+          <button id="load-history-btn" class="ghost">Последний диалог</button>
+        </div>
+        <div id="chat-log" class="chat-log"></div>
+        <form id="chat-form" class="stack">
+          <label for="chat-message">Сообщение</label>
+          <textarea id="chat-message" rows="3" placeholder="Спросите по загруженным документам" required></textarea>
+          <button type="submit">Отправить</button>
+        </form>
+      </section>
+    </section>
+
+    <section class="panel reveal" style="--delay: 0.18s;">
+      <h2>Системный лог</h2>
+      <div id="status-log" class="console"></div>
+    </section>
+  </main>
+
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
