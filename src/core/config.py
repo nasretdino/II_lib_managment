@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import SecretStr, computed_field, BaseModel
+from pydantic import SecretStr, computed_field, BaseModel, model_validator
 from pydantic_core import MultiHostUrl
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -32,8 +32,9 @@ class DatabaseSettings(BaseModel):
 class LLMSettings(BaseModel):
     """Настройки LLM-провайдера (провайдер-агностичные)."""
 
-    provider: Literal["gemini"] = "gemini"
-    api_key: SecretStr
+    provider: Literal["gemini", "ollama"] = "gemini"
+    api_key: SecretStr | None = None
+    ollama_host: str = "http://localhost:11434"
 
     # Модели
     model_name: str = "gemini-2.5-flash"
@@ -58,6 +59,45 @@ class LLMSettings(BaseModel):
     embed_retry_base_delay: float = 30.0
     embed_retry_max_delay: float = 120.0
 
+    @model_validator(mode="after")
+    def validate_provider_settings(self) -> "LLMSettings":
+        if self.provider == "gemini" and self.api_key is None:
+            raise ValueError("Для провайдера gemini требуется LLM__API_KEY")
+        return self
+
+
+class Neo4jSettings(BaseModel):
+    host: str = "neo4j"
+    port: int = 7687
+    user: str = "neo4j"
+    password: SecretStr = SecretStr("neo4jpassword")
+    database: str = "neo4j"
+    workspace: str = "default"
+
+    @computed_field
+    @property
+    def uri(self) -> str:
+        return f"bolt://{self.host}:{self.port}"
+
+
+class RagSettings(BaseModel):
+    graph_storage: Literal["Neo4JStorage", "NetworkXStorage"] = "Neo4JStorage"
+
+
+class StorageSettings(BaseModel):
+    """Выбор хранилища файлов: local (папка проекта) или minio (S3)."""
+
+    mode: Literal["local", "minio"] = "minio"
+    local_path: str = "uploads"
+
+
+class MinioSettings(BaseModel):
+    endpoint: str = "minio:9000"
+    access_key: str = "minioadmin"
+    secret_key: SecretStr = SecretStr("minioadmin")
+    bucket_name: str = "documents"
+    use_ssl: bool = False
+
 
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -70,6 +110,10 @@ class AppSettings(BaseSettings):
     env: Literal["dev", "stage", "prod"] = "prod"
     db: DatabaseSettings
     llm: LLMSettings
+    neo4j: Neo4jSettings = Neo4jSettings()
+    rag: RagSettings = RagSettings()
+    storage: StorageSettings = StorageSettings()
+    minio: MinioSettings = MinioSettings()
 
     @computed_field
     @property

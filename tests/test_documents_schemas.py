@@ -34,6 +34,7 @@ class TestDocumentRead:
             id=1,
             filename="test.pdf",
             content_type="application/pdf",
+            file_size=123,
             status="ready",
             created_at="2026-01-01T00:00:00Z",
         )
@@ -51,6 +52,7 @@ class TestDocumentRead:
                 id=1,
                 filename="f.txt",
                 content_type="text/plain",
+                file_size=10,
                 status=status,
                 created_at="2026-01-01T00:00:00Z",
             )
@@ -63,6 +65,7 @@ class TestDocumentRead:
             id = 1
             filename = "f.txt"
             content_type = "text/plain"
+            file_size = 12
             status = "ready"
             created_at = "2026-01-01T00:00:00Z"
 

@@ -15,6 +15,7 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(127))
     file_path: Mapped[str] = mapped_column(String(512))
+    file_size: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     text_content: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(20), default="pending")
     chunks_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)

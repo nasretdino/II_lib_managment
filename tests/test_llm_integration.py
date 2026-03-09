@@ -18,6 +18,7 @@ from src.core.config import LLMSettings
 from src.modules.rag.llm_provider import (
     LLMProvider,
     GeminiProvider,
+    OllamaProvider,
     create_provider,
 )
 from src.modules.rag.services import (
@@ -35,6 +36,7 @@ def _make_llm_settings(**overrides) -> LLMSettings:
     defaults = {
         "provider": "gemini",
         "api_key": SecretStr("test-api-key"),
+        "ollama_host": "http://localhost:11434",
         "model_name": "gemini-2.5-flash",
         "embedding_model": "gemini-embedding-001",
         "embedding_dim": 768,
@@ -211,6 +213,56 @@ class TestLLMProviderProperties:
         assert provider.max_token_size == 4096
 
 
+@pytest.mark.asyncio
+class TestOllamaProvider:
+    """Тесты OllamaProvider: complete() и embed()."""
+
+    @patch("lightrag.llm.ollama.ollama_model_complete", new_callable=AsyncMock)
+    async def test_complete_calls_ollama(self, mock_complete):
+        """complete() вызывает ollama_model_complete с правильными параметрами."""
+        mock_complete.return_value = "response"
+        provider = OllamaProvider(
+            _make_llm_settings(
+                provider="ollama",
+                model_name="qwen2.5:7b",
+                embedding_model="bge-m3:latest",
+                ollama_host="http://ollama:11434",
+            )
+        )
+
+        result = await provider.complete("test prompt", system_prompt="sys")
+
+        assert result == "response"
+        mock_complete.assert_awaited_once()
+        call_kwargs = mock_complete.call_args[1]
+        assert call_kwargs["system_prompt"] == "sys"
+        assert call_kwargs["history_messages"] == []
+        assert call_kwargs["host"] == "http://ollama:11434"
+        assert call_kwargs["api_key"] == "test-api-key"
+
+    @patch("lightrag.llm.ollama.ollama_embed")
+    async def test_embed_calls_ollama(self, mock_embed):
+        """embed() вызывает ollama_embed.func с правильными параметрами."""
+        expected = np.array([[0.1, 0.2, 0.3]])
+        mock_embed.func = AsyncMock(return_value=expected)
+
+        provider = OllamaProvider(
+            _make_llm_settings(
+                provider="ollama",
+                embedding_model="bge-m3:latest",
+                ollama_host="http://ollama:11434",
+            )
+        )
+        result = await provider.embed(["hello"])
+
+        np.testing.assert_array_equal(result, expected)
+        mock_embed.func.assert_awaited_once()
+        call_kwargs = mock_embed.func.call_args[1]
+        assert call_kwargs["embed_model"] == "bge-m3:latest"
+        assert call_kwargs["embedding_dim"] == 768
+        assert call_kwargs["host"] == "http://ollama:11434"
+
+
 class TestCreateProvider:
     """Тесты фабрики create_provider."""
 
@@ -219,6 +271,12 @@ class TestCreateProvider:
         settings = _make_llm_settings(provider="gemini")
         provider = create_provider(settings)
         assert isinstance(provider, GeminiProvider)
+
+    def test_creates_ollama(self):
+        """provider='ollama' → OllamaProvider."""
+        settings = _make_llm_settings(provider="ollama")
+        provider = create_provider(settings)
+        assert isinstance(provider, OllamaProvider)
 
     def test_unknown_provider_raises(self):
         """Неизвестный провайдер — ValueError."""
@@ -233,6 +291,18 @@ class TestCreateProvider:
         settings = _make_llm_settings(model_name="my-model")
         provider = create_provider(settings)
         assert provider.model_name == "my-model"
+
+
+class TestLLMSettingsValidation:
+    """Валидация настроек LLM для разных провайдеров."""
+
+    def test_gemini_requires_api_key(self):
+        with pytest.raises(ValueError, match="LLM__API_KEY"):
+            LLMSettings(provider="gemini", api_key=None)
+
+    def test_ollama_allows_missing_api_key(self):
+        settings = LLMSettings(provider="ollama", api_key=None)
+        assert settings.provider == "ollama"
 
 
 # ── RagService._llm_func ─────────────────────────────────

@@ -76,6 +76,9 @@ class GeminiProvider(LLMProvider):
     ) -> str:
         from lightrag.llm.gemini import gemini_model_complete
 
+        if self._settings.api_key is None:
+            raise ValueError("Для Gemini требуется LLM__API_KEY")
+
         return await gemini_model_complete(
             prompt,
             system_prompt=system_prompt,
@@ -89,6 +92,9 @@ class GeminiProvider(LLMProvider):
     async def embed(self, texts: list[str]) -> np.ndarray:
         from lightrag.llm.gemini import gemini_embed
 
+        if self._settings.api_key is None:
+            raise ValueError("Для Gemini требуется LLM__API_KEY")
+
         return await gemini_embed.func(
             texts,
             api_key=self._settings.api_key.get_secret_value(),
@@ -97,10 +103,54 @@ class GeminiProvider(LLMProvider):
         )
 
 
+class OllamaProvider(LLMProvider):
+    """LLM-провайдер на базе Ollama."""
+
+    async def complete(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        history_messages: list | None = None,
+        keyword_extraction: bool = False,
+        **kwargs,
+    ) -> str:
+        from lightrag.llm.ollama import ollama_model_complete
+
+        return await ollama_model_complete(
+            prompt,
+            system_prompt=system_prompt,
+            history_messages=history_messages or [],
+            keyword_extraction=keyword_extraction,
+            host=self._settings.ollama_host,
+            api_key=(
+                self._settings.api_key.get_secret_value()
+                if self._settings.api_key is not None
+                else None
+            ),
+            **kwargs,
+        )
+
+    async def embed(self, texts: list[str]) -> np.ndarray:
+        from lightrag.llm.ollama import ollama_embed
+
+        return await ollama_embed.func(
+            texts,
+            embed_model=self._settings.embedding_model,
+            embedding_dim=self._settings.embedding_dim,
+            host=self._settings.ollama_host,
+            api_key=(
+                self._settings.api_key.get_secret_value()
+                if self._settings.api_key is not None
+                else None
+            ),
+        )
+
+
 # ── Реестр провайдеров ────────────────────────────────────
 
 _PROVIDERS: dict[str, type[LLMProvider]] = {
     "gemini": GeminiProvider,
+    "ollama": OllamaProvider,
 }
 
 

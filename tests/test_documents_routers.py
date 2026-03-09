@@ -181,6 +181,7 @@ class TestDocumentsAPI:
         assert "id" in data
         assert "filename" in data
         assert "content_type" in data
+        assert "file_size" in data
         assert "status" in data
         assert "created_at" in data
 

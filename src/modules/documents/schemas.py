@@ -11,6 +11,7 @@ class DocumentRead(BaseModel):
     id: int
     filename: str
     content_type: str
+    file_size: int
     status: str
     created_at: datetime
 

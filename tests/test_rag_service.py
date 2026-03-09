@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from src.core.config import settings
 from src.modules.rag.schemas import SearchResult, SearchRequest, IndexResult
 from src.modules.rag.services import RagService
 
@@ -255,6 +256,74 @@ class TestLifecycle:
         mock_lightrag_cls.assert_called_once()
         mock_instance.initialize_storages.assert_awaited_once()
         assert service._rag is mock_instance
+
+    @patch("src.modules.rag.services.LightRAG")
+    async def test_initialize_sets_expected_graph_storage(self, mock_lightrag_cls):
+        """initialize() использует graph_storage из настроек приложения."""
+        mock_instance = MagicMock()
+        mock_instance.initialize_storages = AsyncMock()
+        mock_lightrag_cls.return_value = mock_instance
+
+        provider = MagicMock()
+        provider.model_name = "test-model"
+        provider.embedding_model = "test-embed"
+        provider.embedding_dim = 768
+        provider.max_token_size = 8192
+
+        service = RagService(provider=provider)
+        await service.initialize()
+
+        call_kwargs = mock_lightrag_cls.call_args.kwargs
+        assert call_kwargs["graph_storage"] == settings.rag.graph_storage
+
+    @patch("src.modules.rag.services.LightRAG")
+    async def test_initialize_syncs_lightrag_env(self, mock_lightrag_cls):
+        """initialize() синхронизирует env-переменные, которые читает LightRAG."""
+        import os
+
+        mock_instance = MagicMock()
+        mock_instance.initialize_storages = AsyncMock()
+        mock_lightrag_cls.return_value = mock_instance
+
+        provider = MagicMock()
+        provider.model_name = "test-model"
+        provider.embedding_model = "test-embed"
+        provider.embedding_dim = 768
+        provider.max_token_size = 8192
+
+        service = RagService(provider=provider)
+        await service.initialize()
+
+        assert os.environ["POSTGRES_HOST"] == settings.db.host
+        assert os.environ["POSTGRES_PORT"] == str(settings.db.port)
+        assert os.environ["POSTGRES_USER"] == settings.db.user
+        assert os.environ["POSTGRES_DATABASE"] == settings.db.name
+        assert os.environ["NEO4J_URI"] == settings.neo4j.uri
+        assert os.environ["NEO4J_USERNAME"] == settings.neo4j.user
+        assert os.environ["NEO4J_DATABASE"] == settings.neo4j.database
+
+    @patch("src.modules.rag.services.LightRAG")
+    async def test_initialize_uses_isolated_working_dir(
+        self,
+        mock_lightrag_cls,
+        isolate_rag_storage,
+    ):
+        """Рабочая директория LightRAG берётся из тестового tmp-пути, не из корня репозитория."""
+        mock_instance = MagicMock()
+        mock_instance.initialize_storages = AsyncMock()
+        mock_lightrag_cls.return_value = mock_instance
+
+        provider = MagicMock()
+        provider.model_name = "test-model"
+        provider.embedding_model = "test-embed"
+        provider.embedding_dim = 768
+        provider.max_token_size = 8192
+
+        service = RagService(provider=provider)
+        await service.initialize()
+
+        call_kwargs = mock_lightrag_cls.call_args.kwargs
+        assert call_kwargs["working_dir"] == str(isolate_rag_storage)
 
 
 # ── Router /rag/search ────────────────────────────────────

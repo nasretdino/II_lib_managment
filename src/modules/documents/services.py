@@ -1,5 +1,6 @@
 import asyncio
 import os
+import tempfile
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -12,40 +13,68 @@ from .chunking import split_into_chunks
 from .dao import DocumentDAO
 from .models import Document
 from .parser import extract_text
-
-UPLOAD_DIR = Path("uploads")
+from .storage import MinioStorage, LocalStorage
 
 
 class DocumentService:
-    def __init__(self, dao: DocumentDAO, rag_service: RagService | None = None):
+    def __init__(
+        self,
+        dao: DocumentDAO,
+        storage: MinioStorage | LocalStorage,
+        rag_service: RagService | None = None,
+    ):
         self.dao = dao
+        self.storage = storage
         self.rag = rag_service
+
+    async def _extract_text_from_bytes(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> str:
+        suffix = Path(filename).suffix
+
+        def _write_temp_file() -> str:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                return tmp.name
+
+        temp_path = await asyncio.to_thread(_write_temp_file)
+        try:
+            return await extract_text(temp_path, content_type)
+        finally:
+            temp_file = Path(temp_path)
+            if temp_file.exists():
+                os.remove(temp_file)
 
     async def upload(self, user_id: int, file: UploadFile) -> Document:
         """
         Оркестрация пайплайна загрузки:
-        1. Сохранить файл на диск
+        1. Сохранить файл в MinIO
         2. Создать запись в БД (status="pending")
-        3. Извлечь текст через parser.extract_text()
+        3. Извлечь текст через parser.extract_text() из временного файла
         4. Разбить на чанки через chunking.split_into_chunks()
         5. Проиндексировать в LightRAG через RagService
         6. Обновить status="ready"
         """
-        user_dir = UPLOAD_DIR / str(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        file_path = user_dir / file.filename
-
-        # 1. Сохранить файл на диск
         content = await file.read()
-        await asyncio.to_thread(file_path.write_bytes, content)
+        content_type = file.content_type or "application/octet-stream"
+        file_uri = await self.storage.upload_bytes(
+            user_id=user_id,
+            filename=file.filename,
+            content=content,
+            content_type=content_type,
+        )
 
         # 2. Создать запись в БД
         doc = await self.dao.add(
             {
                 "user_id": user_id,
                 "filename": file.filename,
-                "content_type": file.content_type or "application/octet-stream",
-                "file_path": str(file_path),
+                "content_type": content_type,
+                "file_path": file_uri,
+                "file_size": len(content),
                 "text_content": "",
                 "status": "pending",
             },
@@ -56,7 +85,11 @@ class DocumentService:
             await self.dao.update_status(doc.id, "processing")
 
             # 3. Извлечь текст
-            text = await extract_text(str(file_path), doc.content_type)
+            text = await self._extract_text_from_bytes(
+                filename=doc.filename,
+                content=content,
+                content_type=doc.content_type,
+            )
 
             # Обновить text_content
             await self.dao.update(
@@ -81,7 +114,7 @@ class DocumentService:
                 await self.rag.index_document(
                     doc_id=doc.id,
                     chunks=chunks,
-                    file_path=str(file_path),
+                    file_path=file_uri,
                 )
                 logger.info("Document {} indexed in RAG", doc.filename)
 
@@ -135,10 +168,13 @@ class DocumentService:
             except Exception:
                 logger.warning("Failed to delete doc {} from RAG index", doc_id)
 
-        # Удалить файл с диска
-        path = Path(doc.file_path)
-        if path.exists():
-            os.remove(path)
+        # Удалить объект из MinIO, локального хранилища или legacy-файл с диска
+        if doc.file_path.startswith("s3://") or doc.file_path.startswith("file://"):
+            await self.storage.delete_by_uri(doc.file_path)
+        else:
+            path = Path(doc.file_path)
+            if path.exists():
+                os.remove(path)
 
         deleted_count = await self.dao.delete(filters={"id": doc_id})
         return deleted_count > 0

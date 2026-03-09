@@ -18,10 +18,12 @@ def setup_logging(env: str = "prod") -> None:
     - В prod/stage: INFO-уровень, JSON-сериализация для агрегаторов логов.
     """
     logger.remove()
+    logger.configure(extra={"request_id": "-"})
 
     fmt = (
         "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
         "<level>{level:<8}</level> | "
+        "rid=<magenta>{extra[request_id]}</magenta> | "
         "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
         "<level>{message}</level>"
     )
@@ -32,6 +34,8 @@ def setup_logging(env: str = "prod") -> None:
             format=fmt,
             level="DEBUG",
             colorize=True,
+            backtrace=True,
+            diagnose=False,
         )
     else:
         logger.add(
@@ -40,4 +44,6 @@ def setup_logging(env: str = "prod") -> None:
             level="INFO",
             colorize=False,
             serialize=True,
+            backtrace=False,
+            diagnose=False,
         )

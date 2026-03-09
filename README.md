@@ -42,8 +42,9 @@
 ### Ключевые принципы
 
 - **ARCADE** (Ask → Retrieve → Analyze → Critique → Decide → Emit) — вместо одного гигантского промпта задача разбита на 6 специализированных узлов LangGraph, каждый со своей ответственностью.
-- **LightRAG** — библиотека для GraphRAG, которая берёт на себя построение графа знаний, извлечение сущностей/связей и гибридный поиск (vector + graph). Никакого ручного написания CTE-запросов и graph traversal.
-- **Простота** — учебный проект без брокеров сообщений, очередей, Kubernetes. Docker Compose поднимает PostgreSQL + бэкенд + Nginx, и всё работает.
+- **LightRAG** — библиотека для GraphRAG, которая берёт на себя построение графа знаний, извлечение сущностей/связей и гибридный поиск (vector + graph).
+- **Хранилища по ролям** — PostgreSQL + pgvector хранит реляционные данные и embeddings, Neo4j хранит граф Entities/Relationships.
+- **Простота** — учебный проект без брокеров сообщений, очередей, Kubernetes. Docker Compose поднимает PostgreSQL + Neo4j + бэкенд, и всё работает.
 - **Потоковая передача** — Server-Sent Events для вывода ответов токен за токеном, включая промежуточные статусы (routing, retrieval, analysis, critique).
 
 ---
@@ -59,7 +60,7 @@
 | ORM | SQLAlchemy 2 (async) |
 | DB-драйвер | asyncpg |
 | Миграции | Alembic |
-| База данных | PostgreSQL + pgvector |
+| База данных | PostgreSQL + pgvector + Neo4j + MinIO |
 | Логирование | Loguru |
 | Парсинг документов | MarkItDown / PyMuPDF |
 | Разбиение на чанки | Semantic Router / text_splitter из LangChain |
@@ -100,8 +101,14 @@
                                     │   PostgreSQL + pgvector           │
                                     │                                   │
                                     │  users, documents, chat_sessions  │
-                                    │  chat_messages                    │
-                                    │  + LightRAG storage               │
+                                    │  chat_messages, vector embeddings │
+                                    └────────────────┬──────────────────┘
+                                                     │
+                                    ┌────────────────▼──────────────────┐
+                                    │             Neo4j                 │
+                                    │                                   │
+                                    │  entity graph + relationships     │
+                                    │  (Graph RAG knowledge layer)      │
                                     └───────────────────────────────────┘
 ```
 
@@ -256,11 +263,14 @@ location /chat/stream {
 
 #### `docker-compose.yml`
 
-Описывает **3 сервиса**:
+Описывает **6 сервисов**:
 
 | Сервис | Образ | Описание |
 |---|---|---|
 | `db` | `pgvector/pgvector:pg17` | PostgreSQL 17 с pgvector. Volume для персистентности |
+| `neo4j` | `neo4j:5.26` | Graph DB для хранения сущностей и связей GraphRAG |
+| `minio` | `minio/minio` | S3-совместимое объектное хранилище документов |
+| `minio-init` | `minio/mc` | Инициализация бакета `documents` при старте окружения |
 | `nginx` | `nginx:alpine` | Reverse proxy с отключённой буферизацией для SSE |
 | `backend` | build из `./Dockerfile` | FastAPI через Gunicorn |
 
@@ -1026,13 +1036,28 @@ async def get_messages(session_id: int, ...): ...
 | `DB__POOL_SIZE` | Размер пула соединений | `20` |
 | `DB__MAX_OVERFLOW` | Макс. дополнительных соединений | `10` |
 | `DB__POOL_RECYCLE` | Время жизни соединения (сек) | `1800` |
-| `OPENAI_API_KEY` | ⬜ Ключ OpenAI API | `sk-...` |
-| `ANTHROPIC_API_KEY` | ⬜ Ключ Anthropic API | `sk-ant-...` |
-| `LLM__ANALYST_MODEL` | ⬜ Модель для Analyst | `gpt-4o` |
-| `LLM__CRITIC_MODEL` | ⬜ Модель для Critic | `claude-sonnet-4-20250514` |
-| `LLM__EMBEDDING_MODEL` | ⬜ Модель для эмбеддингов | `text-embedding-3-small` |
-| `LLM__EMBEDDING_DIM` | ⬜ Размерность вектора | `1536` |
-| `LLM__MAX_ARCADE_ITERATIONS` | ⬜ Макс. итераций ARCADE | `3` |
+| `RAG__GRAPH_STORAGE` | Graph backend для LightRAG (`Neo4JStorage` или `NetworkXStorage`) | `Neo4JStorage` |
+| `NEO4J__HOST` | Хост Neo4j (`neo4j` в Docker Compose) | `neo4j` |
+| `NEO4J__PORT` | Bolt-порт Neo4j | `7687` |
+| `NEO4J__USER` | Пользователь Neo4j | `neo4j` |
+| `NEO4J__PASSWORD` | Пароль Neo4j | `neo4jpassword` |
+| `NEO4J__DATABASE` | Имя базы Neo4j | `neo4j` |
+| `NEO4J__WORKSPACE` | Workspace-лейбл графа в LightRAG | `default` |
+| `STORAGE__MODE` | Хранилище файлов: `local` (папка проекта) или `minio` (S3) | `minio` |
+| `STORAGE__LOCAL_PATH` | Путь к папке при `STORAGE__MODE=local` | `uploads` |
+| `MINIO__ENDPOINT` | Адрес MinIO S3 API (при `STORAGE__MODE=minio`) | `minio:9000` |
+| `MINIO__ACCESS_KEY` | Access key для MinIO | `minioadmin` |
+| `MINIO__SECRET_KEY` | Secret key для MinIO | `minioadmin` |
+| `MINIO__BUCKET_NAME` | Бакет для хранения файлов | `documents` |
+| `MINIO__USE_SSL` | Использовать HTTPS к MinIO | `false` |
+| `LLM__PROVIDER` | LLM-провайдер: `gemini` или `ollama` | `gemini` |
+| `LLM__API_KEY` | API-ключ (обязателен для gemini) | `AI...` |
+| `LLM__OLLAMA_HOST` | Хост Ollama (при `LLM__PROVIDER=ollama`) | `http://localhost:11434` |
+| `LLM__MODEL_NAME` | Модель для генерации | `gemini-2.5-flash` |
+| `LLM__EMBEDDING_MODEL` | Модель для эмбеддингов | `gemini-embedding-001` |
+| `LLM__EMBEDDING_DIM` | Размерность вектора | `768` |
+| `LLM__CHUNK_TOKEN_SIZE` | Размер чанка (токены) | `1200` |
+| `LLM__CHUNK_OVERLAP_TOKEN_SIZE` | Перекрытие чанков (токены) | `100` |
 
 ---
 
@@ -1040,25 +1065,73 @@ async def get_messages(session_id: int, ...): ...
 
 ### Dev (локальная разработка)
 
+Инфраструктурные сервисы запускаются в Docker, приложение — локально.
+
 ```bash
 # 1. Скопировать шаблон переменных
 cp .env.example .env
 
 # 2. Выставить для локальной разработки:
 #    ENV=dev
-#    DB__HOST=localhost    (← важно! не "db")
+#    DB__HOST=localhost      (← важно! не "db")
+#    NEO4J__HOST=localhost   (← важно! не "neo4j")
+#    MINIO__ENDPOINT=localhost:9000  (← если используете MinIO)
+#    LLM__API_KEY=<ваш ключ Gemini API>
 
-# 3. Поднять только БД в Docker
+# 3. Выбрать режим хранения файлов (один из двух):
+
+#    Вариант A — локальное хранилище (без MinIO):
+#    STORAGE__MODE=local
+#    Файлы будут сохраняться в папку uploads/ проекта.
+#    MinIO запускать не нужно.
+
+#    Вариант B — MinIO (S3-совместимое хранилище):
+#    STORAGE__MODE=minio
+#    MINIO__ENDPOINT=localhost:9000
+
+# 4. (Опционально) Выбрать graph storage:
+#    RAG__GRAPH_STORAGE=Neo4JStorage    ← полноценный граф (нужен Neo4j)
+#    RAG__GRAPH_STORAGE=NetworkXStorage ← локальный fallback (Neo4j не нужен)
+
+# 5. Поднять инфраструктуру в Docker
+#    Минимальный набор — только PostgreSQL:
 docker compose up db -d
 
-# 4. Прогнать миграции
+#    Если используете Neo4j (RAG__GRAPH_STORAGE=Neo4JStorage):
+docker compose up db neo4j -d
+
+#    Если используете MinIO (STORAGE__MODE=minio):
+docker compose up db neo4j minio minio-init -d
+
+# 6. Прогнать миграции
 poetry run alembic upgrade head
 
-# 5. Запустить сервер
+# 7. Запустить сервер
 poetry run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 
-# 6. Тесты (БД не нужна — тесты используют SQLite in-memory)
+# 8. Тесты (БД не нужна — тесты используют SQLite in-memory,
+#    MinIO и RAG мокаются, данные проекта не затрагиваются)
 poetry run pytest tests/
+```
+
+**Минимальный dev-сетап** (без MinIO и Neo4j):
+
+```env
+ENV=dev
+DB__HOST=localhost
+DB__PORT=5432
+DB__USER=postgres
+DB__PASSWORD=postgres
+DB__NAME=lib_management
+STORAGE__MODE=local
+RAG__GRAPH_STORAGE=NetworkXStorage
+LLM__API_KEY=<ваш ключ>
+```
+
+```bash
+docker compose up db -d
+poetry run alembic upgrade head
+poetry run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 В dev-режиме (`ENV=dev`):
@@ -1070,17 +1143,28 @@ poetry run pytest tests/
 
 ### Prod (Docker Compose)
 
+Все сервисы запускаются через Docker Compose.
+
 ```bash
 # 1. Настроить .env:
 #    ENV=prod
-#    DB__HOST=db           (← имя сервиса в docker-compose)
+#    DB__HOST=db                    (← имя сервиса в docker-compose)
 #    DB__PASSWORD=<надёжный пароль>
+#    NEO4J__HOST=neo4j              (← имя сервиса)
+#    NEO4J__PASSWORD=<надёжный пароль>
+#    MINIO__ENDPOINT=minio:9000     (← имя сервиса)
+#    STORAGE__MODE=minio
+#    RAG__GRAPH_STORAGE=Neo4JStorage
+#    LLM__API_KEY=<ваш ключ>
 
 # 2. Запустить всё
 docker compose up -d --build
 ```
 
 Docker Compose поднимет:
-- **db** — PostgreSQL 17
+- **db** — PostgreSQL 17 с pgvector
+- **neo4j** — Neo4j 5.26 (граф знаний)
+- **minio** — S3-совместимое объектное хранилище
+- **minio-init** — создание бакета `documents`
 - **migrate** — однократный запуск `alembic upgrade head`
 - **app** — FastAPI через Uvicorn

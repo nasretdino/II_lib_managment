@@ -1,5 +1,4 @@
-import shutil
-from pathlib import Path
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.db.base_model import Base
 from src.db import get_db
 from src.main import app
+from src.modules.documents.storage import get_object_storage
 from src.modules.rag.dependencies import get_rag
 from src.modules.rag.schemas import SearchResult, IndexResult
 
@@ -26,7 +26,20 @@ async_session_test = async_sessionmaker(
     autocommit=False,
 )
 
-UPLOADS_DIR = Path("uploads")
+
+LIGHTRAG_ENV_KEYS = (
+    "POSTGRES_HOST",
+    "POSTGRES_PORT",
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_DATABASE",
+    "POSTGRES_WORKSPACE",
+    "NEO4J_URI",
+    "NEO4J_USERNAME",
+    "NEO4J_PASSWORD",
+    "NEO4J_DATABASE",
+    "NEO4J_WORKSPACE",
+)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -40,13 +53,32 @@ async def setup_db():
     await engine_test.dispose()
 
 
+def _mock_object_storage():
+    mock = MagicMock()
+    mock.upload_bytes = AsyncMock(return_value="s3://documents/users/1/mock-file.txt")
+    mock.delete_by_uri = AsyncMock()
+    mock.ensure_bucket = AsyncMock()
+    return mock
+
+
 @pytest.fixture(autouse=True)
-def isolate_uploads(tmp_path):
-    """Перенаправляет UPLOAD_DIR в временную папку, чтобы тесты не трогали реальную uploads/."""
-    test_uploads = tmp_path / "uploads"
-    test_uploads.mkdir()
-    with patch("src.modules.documents.services.UPLOAD_DIR", test_uploads):
-        yield test_uploads
+def isolate_rag_storage(tmp_path):
+    """Перенаправляет RAG storage в tmp, чтобы тесты не создавали rag_storage/ в репозитории."""
+    test_rag_storage = tmp_path / "rag_storage"
+    with patch("src.modules.rag.services.WORKING_DIR", test_rag_storage):
+        yield test_rag_storage
+
+
+@pytest.fixture(autouse=True)
+def isolate_lightrag_env():
+    """Восстанавливает env LightRAG после каждого теста, чтобы избежать межтестовых утечек."""
+    old_values = {key: os.environ.get(key) for key in LIGHTRAG_ENV_KEYS}
+    yield
+    for key, old_value in old_values.items():
+        if old_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old_value
 
 
 @pytest_asyncio.fixture
@@ -87,6 +119,7 @@ async def client():
     """HTTP-клиент для интеграционных тестов роутеров."""
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_rag] = _mock_rag_service
+    app.dependency_overrides[get_object_storage] = _mock_object_storage
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

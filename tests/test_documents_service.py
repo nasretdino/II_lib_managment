@@ -23,8 +23,16 @@ async def user(db_session: AsyncSession):
 
 
 @pytest.fixture
-def doc_service(db_session: AsyncSession) -> DocumentService:
-    return DocumentService(DocumentDAO(db_session))
+def object_storage_mock() -> MagicMock:
+    storage = MagicMock()
+    storage.upload_bytes = AsyncMock(return_value="s3://documents/users/1/mock-upload.txt")
+    storage.delete_by_uri = AsyncMock()
+    return storage
+
+
+@pytest.fixture
+def doc_service(db_session: AsyncSession, object_storage_mock: MagicMock) -> DocumentService:
+    return DocumentService(DocumentDAO(db_session), storage=object_storage_mock)
 
 
 class TestDocumentServiceGetById:
@@ -133,8 +141,7 @@ class TestDocumentServiceGetByUser:
 
 class TestDocumentServiceDelete:
     async def test_delete(self, doc_service: DocumentService, db_session, user, tmp_path):
-        file_path = tmp_path / "to_delete.txt"
-        file_path.write_text("content")
+        file_uri = "s3://documents/users/1/to_delete.txt"
 
         dao = DocumentDAO(db_session)
         doc = await dao.add(
@@ -142,7 +149,7 @@ class TestDocumentServiceDelete:
                 "user_id": user.id,
                 "filename": "to_delete.txt",
                 "content_type": "text/plain",
-                "file_path": str(file_path),
+                "file_path": file_uri,
                 "text_content": "content",
                 "status": "ready",
             },
@@ -151,14 +158,14 @@ class TestDocumentServiceDelete:
 
         deleted = await doc_service.delete(doc.id)
         assert deleted is True
-        assert not file_path.exists()
+        doc_service.storage.delete_by_uri.assert_awaited_once_with(file_uri)
 
     async def test_delete_not_found(self, doc_service: DocumentService):
         deleted = await doc_service.delete(9999)
         assert deleted is False
 
     async def test_delete_file_already_gone(self, doc_service: DocumentService, db_session, user):
-        """Удаление документа, файл которого уже отсутствует на диске."""
+        """Удаление legacy-документа с несуществующим локальным путем."""
         dao = DocumentDAO(db_session)
         doc = await dao.add(
             {
@@ -233,15 +240,16 @@ class TestDocumentServiceUpload:
         assert doc.status == "ready"
 
     async def test_upload_creates_file_on_disk(self, doc_service, user):
-        """Upload создаёт файл на диске в uploads/{user_id}/."""
-        from pathlib import Path
+        """Upload сохраняет путь в MinIO и размер файла в метаданные."""
         file = UploadFile(
             filename="disk.txt",
             file=io.BytesIO(b"disk content"),
             headers={"content-type": "text/plain"},
         )
         doc = await doc_service.upload(user.id, file)
-        assert Path(doc.file_path).exists()
+        assert doc.file_path.startswith("s3://")
+        assert doc.file_size == len(b"disk content")
+        doc_service.storage.upload_bytes.assert_awaited_once()
 
 
 class TestDocumentServiceUploadAllFileTypes:
@@ -328,13 +336,22 @@ class TestDocumentServiceUploadAllFileTypes:
 class TestDocumentServiceUploadWithRag:
     """Тесты upload с интеграцией RAG-сервиса."""
 
-    async def test_upload_calls_rag_index(self, db_session: AsyncSession, user):
+    async def test_upload_calls_rag_index(
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
+    ):
         """Upload вызывает rag.index_document с чанками."""
         mock_rag = MagicMock()
         mock_rag.index_document = AsyncMock(
             return_value=IndexResult(doc_id=0, chunks_count=1, status="indexed")
         )
-        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=mock_rag,
+        )
 
         file = UploadFile(
             filename="rag.txt",
@@ -352,7 +369,11 @@ class TestDocumentServiceUploadWithRag:
 
     async def test_upload_without_rag(self, db_session: AsyncSession, user):
         """Upload без RAG-сервиса работает (rag=None)."""
-        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=MagicMock(upload_bytes=AsyncMock(return_value="s3://documents/users/1/no_rag.txt"), delete_by_uri=AsyncMock()),
+            rag_service=None,
+        )
         file = UploadFile(
             filename="no_rag.txt",
             file=io.BytesIO(b"Content without RAG"),
@@ -363,7 +384,11 @@ class TestDocumentServiceUploadWithRag:
 
     async def test_upload_sets_chunks_count(self, db_session: AsyncSession, user):
         """Upload сохраняет количество чанков."""
-        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=MagicMock(upload_bytes=AsyncMock(return_value="s3://documents/users/1/chunks.txt"), delete_by_uri=AsyncMock()),
+            rag_service=None,
+        )
         # Достаточно текста для нескольких чанков
         text = "Paragraph of content. " * 200
         file = UploadFile(
@@ -380,10 +405,17 @@ class TestDocumentServiceUploadErrors:
     """Тесты обработки ошибок при upload."""
 
     async def test_upload_value_error_wraps_to_parsing_error(
-        self, db_session: AsyncSession, user
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
     ):
         """ValueError из extract_text оборачивается в DocumentParsingError."""
-        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=None,
+        )
         file = UploadFile(
             filename="fail.txt",
             file=io.BytesIO(b"data"),
@@ -398,10 +430,17 @@ class TestDocumentServiceUploadErrors:
                 await service.upload(user.id, file)
 
     async def test_upload_generic_exception_sets_error_status(
-        self, db_session: AsyncSession, user
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
     ):
         """Непредвиденная ошибка → статус error."""
-        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=None,
+        )
         file = UploadFile(
             filename="crash.txt",
             file=io.BytesIO(b"data"),
@@ -416,10 +455,17 @@ class TestDocumentServiceUploadErrors:
                 await service.upload(user.id, file)
 
     async def test_upload_parsing_error_preserves_doc_in_db(
-        self, db_session: AsyncSession, user
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
     ):
         """При ошибке парсинга документ остаётся в БД со статусом error."""
-        service = DocumentService(DocumentDAO(db_session), rag_service=None)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=None,
+        )
         file = UploadFile(
             filename="err.txt",
             file=io.BytesIO(b"data"),
@@ -443,14 +489,22 @@ class TestDocumentServiceUploadErrors:
 class TestDocumentServiceDeleteWithRag:
     """Тесты удаления с RAG-интеграцией."""
 
-    async def test_delete_calls_rag_delete(self, db_session: AsyncSession, user, tmp_path):
+    async def test_delete_calls_rag_delete(
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
+    ):
         """Удаление документа вызывает rag.delete_document."""
         mock_rag = MagicMock()
         mock_rag.delete_document = AsyncMock()
-        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=mock_rag,
+        )
 
-        file_path = tmp_path / "del.txt"
-        file_path.write_text("content")
+        file_uri = "s3://documents/users/1/del.txt"
 
         dao = DocumentDAO(db_session)
         doc = await dao.add(
@@ -458,7 +512,7 @@ class TestDocumentServiceDeleteWithRag:
                 "user_id": user.id,
                 "filename": "del.txt",
                 "content_type": "text/plain",
-                "file_path": str(file_path),
+                "file_path": file_uri,
                 "text_content": "content",
                 "status": "ready",
                 "chunks_count": 3,
@@ -473,15 +527,21 @@ class TestDocumentServiceDeleteWithRag:
         )
 
     async def test_delete_rag_failure_still_deletes(
-        self, db_session: AsyncSession, user, tmp_path
+        self,
+        db_session: AsyncSession,
+        user,
+        object_storage_mock: MagicMock,
     ):
-        """Ошибка RAG при удалении не мешает удалению из БД и диска."""
+        """Ошибка RAG при удалении не мешает удалению из БД и MinIO."""
         mock_rag = MagicMock()
         mock_rag.delete_document = AsyncMock(side_effect=Exception("RAG fail"))
-        service = DocumentService(DocumentDAO(db_session), rag_service=mock_rag)
+        service = DocumentService(
+            DocumentDAO(db_session),
+            storage=object_storage_mock,
+            rag_service=mock_rag,
+        )
 
-        file_path = tmp_path / "rag_fail.txt"
-        file_path.write_text("text")
+        file_uri = "s3://documents/users/1/rag_fail.txt"
 
         dao = DocumentDAO(db_session)
         doc = await dao.add(
@@ -489,7 +549,7 @@ class TestDocumentServiceDeleteWithRag:
                 "user_id": user.id,
                 "filename": "rag_fail.txt",
                 "content_type": "text/plain",
-                "file_path": str(file_path),
+                "file_path": file_uri,
                 "text_content": "text",
                 "status": "ready",
                 "chunks_count": 2,
@@ -499,4 +559,4 @@ class TestDocumentServiceDeleteWithRag:
 
         deleted = await service.delete(doc.id)
         assert deleted is True
-        assert not file_path.exists()
+        object_storage_mock.delete_by_uri.assert_awaited_once_with(file_uri)
