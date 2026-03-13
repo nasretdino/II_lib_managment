@@ -10,6 +10,13 @@ from src.modules.agents.state import AgentState
 logger = get_logger(module="agents", node="critique")
 
 
+def _normalize_ollama_base_url(url: str) -> str:
+    clean = url.rstrip("/")
+    if clean.endswith("/v1"):
+        return clean
+    return f"{clean}/v1"
+
+
 class CriticResponse(BaseModel):
     is_approved: bool
     critique: str = Field(default="")
@@ -30,7 +37,7 @@ class CriticNode:
 
         if settings.llm.provider == "ollama":
             if "OLLAMA_BASE_URL" not in os.environ:
-                os.environ["OLLAMA_BASE_URL"] = settings.llm.ollama_host
+                os.environ["OLLAMA_BASE_URL"] = _normalize_ollama_base_url(settings.llm.ollama_host)
             return f"ollama:{settings.llm.model_name}"
 
         return settings.llm.model_name
@@ -41,7 +48,7 @@ class CriticNode:
             logger.info("Initializing critic agent with model={}", model_name)
             self._agent = Agent(
                 model=model_name,
-                result_type=CriticResponse,
+                output_type=CriticResponse,
                 system_prompt=(
                     "You are a strict critic in ARCADE reflection loop. "
                     "Do not rewrite answer. Only evaluate factual grounding against context, "

@@ -1,4 +1,5 @@
 import os
+import re
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -8,6 +9,13 @@ from src.modules.agents.state import AgentState
 
 
 logger = get_logger(module="agents", node="analyze")
+
+
+def _normalize_ollama_base_url(url: str) -> str:
+    clean = url.rstrip("/")
+    if clean.endswith("/v1"):
+        return clean
+    return f"{clean}/v1"
 
 
 class AnalystResponse(BaseModel):
@@ -28,7 +36,7 @@ class AnalystNode:
 
         if settings.llm.provider == "ollama":
             if "OLLAMA_BASE_URL" not in os.environ:
-                os.environ["OLLAMA_BASE_URL"] = settings.llm.ollama_host
+                os.environ["OLLAMA_BASE_URL"] = _normalize_ollama_base_url(settings.llm.ollama_host)
             return f"ollama:{settings.llm.model_name}"
 
         return settings.llm.model_name
@@ -39,7 +47,7 @@ class AnalystNode:
             logger.info("Initializing analyst agent with model={}", model_name)
             self._agent = Agent(
                 model=model_name,
-                result_type=AnalystResponse,
+                output_type=AnalystResponse,
                 system_prompt=(
                     "You are an analyst in an ARCADE pipeline. "
                     "Use only the provided context. "
@@ -47,6 +55,42 @@ class AnalystNode:
                 ),
             )
         return self._agent
+
+    @staticmethod
+    def _synthesize_fallback_answer(question: str, context: str) -> tuple[str, bool]:
+        if not context.strip():
+            return "Insufficient context found in knowledge base for this question.", True
+
+        # Strip common LightRAG wrappers to avoid returning raw technical dumps.
+        cleaned = re.sub(r"```(?:json)?", "", context, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("```", "")
+        cleaned = re.sub(r"Knowledge Graph Data \([^\n]+\):", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"Vector Data \([^\n]+\):", "", cleaned, flags=re.IGNORECASE)
+
+        desc_pattern = r'["“]description["”]\s*:\s*["“]([^"”]+)["”]'
+        descriptions = [d.strip() for d in re.findall(desc_pattern, cleaned) if d.strip()]
+
+        if descriptions:
+            question_tokens = set(re.findall(r"[a-zA-Zа-яА-Я0-9]{4,}", question.lower()))
+
+            def score(text: str) -> int:
+                text_tokens = set(re.findall(r"[a-zA-Zа-яА-Я0-9]{4,}", text.lower()))
+                return len(question_tokens & text_tokens)
+
+            ranked = sorted(descriptions, key=score, reverse=True)
+            top = []
+            for item in ranked:
+                if item not in top:
+                    top.append(item)
+                if len(top) == 2:
+                    break
+            return " ".join(top), False
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+        if sentences:
+            return " ".join(sentences[:2]), False
+
+        return "I found context, but could not extract a reliable answer from it.", True
 
     async def __call__(self, state: AgentState) -> AgentState:
         logger.info(
@@ -74,14 +118,10 @@ class AnalystNode:
         except Exception:
             # Fallback keeps pipeline resilient when provider is misconfigured.
             logger.exception("Analyze node failed, using fallback draft generation")
-            context = state.get("context", "")
-            short_context = context[:1000]
-            if not short_context.strip():
-                draft_answer = "Insufficient context found in knowledge base for this question."
-                needs_more_context = True
-            else:
-                draft_answer = short_context
-                needs_more_context = False
+            draft_answer, needs_more_context = self._synthesize_fallback_answer(
+                question=state["question"],
+                context=state.get("context", ""),
+            )
             logger.warning(
                 "Analyze fallback produced draft: draft_len={}, needs_more_context={}",
                 len(draft_answer),

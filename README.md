@@ -2,8 +2,6 @@
 
 > Учебный бэкенд для приложения-аналога NotebookLM: загрузка небольших документов, GraphRAG-поиск по ним (LightRAG) и чат с мультиагентной системой ARCADE на базе LangGraph.
 
-**Это учебный проект.** — никаких брокеров сообщений, Kubernetes, очередей задач и прочего оверинжиниринга. Всё должно работать просто, красиво и понятно.
-
 ---
 
 ## Оглавление
@@ -144,32 +142,6 @@
 | **Decide** | Условный переход | Если Критик находит изъян → формирует корректирующую инструкцию и направляет поток обратно на Retrieve или Analyze. Если ответ ок → переход к Emit. |
 | **Emit** | Вывод | Форматирование финального ответа и отправка клиенту в потоковом режиме (SSE). |
 
-### SSE и Nginx
-
-Большинство обратных прокси, включая Nginx, по умолчанию **буферизируют** HTTP-ответы. Для SSE это убивает «typewriter effect» — пользователь не увидит ответа, пока LLM не сгенерирует его целиком.
-
-**Решение:**
-
-1. FastAPI отправляет заголовок `X-Accel-Buffering: no`
-2. В конфигурации Nginx для SSE-маршрутов:
-
-```nginx
-location /chat/stream {
-    proxy_pass http://backend:8000;
-
-    proxy_buffering off;           # отключить буферизацию ответов
-    proxy_cache off;               # не кэшировать
-    chunked_transfer_encoding off; # SSE не нужен chunked
-    proxy_http_version 1.1;
-    proxy_set_header Connection '';
-
-    proxy_read_timeout 300s;       # увеличен для долгих "размышлений" агента
-}
-```
-
-3. **Keep-alive пинги**: для предотвращения разрыва соединения прокси-сервером во время долгих стадий (например, Critique), сервер транслирует пустые SSE-комментарии (`:\n\n`) каждые **15 секунд**.
-
----
 
 ## Структура проекта
 
@@ -208,7 +180,7 @@ location /chat/stream {
     └── modules/
         ├── __init__.py
         │
-        ├── users/               # ✅ Готов
+        ├── users/               
         │   ├── models.py        # Таблица users
         │   ├── schemas.py       # UserCreate, UserUpdate, UserRead, UserFilter
         │   ├── dao.py           # UserDAO(BaseDAO)
@@ -216,7 +188,7 @@ location /chat/stream {
         │   ├── routers.py       # CRUD /users
         │   └── dependencies.py  # DI
         │
-        ├── documents/           # ✅ Готов — Загрузка и обработка документов
+        ├── documents/           # Загрузка и обработка документов
         │   ├── models.py        # Таблица documents
         │   ├── schemas.py       # DocumentUpload, DocumentRead
         │   ├── dao.py           # DocumentDAO
@@ -226,7 +198,7 @@ location /chat/stream {
         │   ├── parser.py        # Парсинг файлов через MarkItDown / PyMuPDF
         │   └── chunking.py      # Разбиение на чанки (Semantic Router / text_splitter)
         │
-        ├── rag/                 # ✅ Готов — LightRAG: индексация и поиск
+        ├── rag/                 # LightRAG: индексация и поиск
         │   ├── __init__.py
         │   ├── schemas.py       # SearchResult, ChunkRead
         │   ├── services.py      # RagService — обёртка над LightRAG
@@ -255,336 +227,9 @@ location /chat/stream {
             └── dependencies.py  # DI
 ```
 
----
 
-## Описание каждого файла
 
-### Инфраструктура (корень)
-
-#### `docker-compose.yml`
-
-Описывает **6 сервисов**:
-
-| Сервис | Образ | Описание |
-|---|---|---|
-| `db` | `pgvector/pgvector:pg17` | PostgreSQL 17 с pgvector. Volume для персистентности |
-| `neo4j` | `neo4j:5.26` | Graph DB для хранения сущностей и связей GraphRAG |
-| `minio` | `minio/minio` | S3-совместимое объектное хранилище документов |
-| `minio-init` | `minio/mc` | Инициализация бакета `documents` при старте окружения |
-| `nginx` | `nginx:alpine` | Reverse proxy с отключённой буферизацией для SSE |
-| `backend` | build из `./Dockerfile` | FastAPI через Gunicorn |
-
-```yaml
-services:
-  db:
-    image: pgvector/pgvector:pg17
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    environment:
-      POSTGRES_USER: ...
-      POSTGRES_PASSWORD: ...
-      POSTGRES_DB: ...
-
-  backend:
-    build: .
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file: .env
-
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - backend
-```
-
-#### `nginx/nginx.conf`
-
-```nginx
-# Общий проксирование
-location / {
-    proxy_pass http://backend:8000;
-    proxy_http_version 1.1;
-}
-
-# SSE-маршрут — отключение буферизации
-location /chat/stream {
-    proxy_pass http://backend:8000;
-    proxy_buffering off;
-    proxy_cache off;
-    chunked_transfer_encoding off;
-    proxy_set_header Connection '';
-    proxy_http_version 1.1;
-    proxy_read_timeout 300s;       # долгие "размышления" агентов
-}
-```
-
-- `proxy_buffering off` — без этого SSE-события приходят пачкой, а не потоком.
-- `proxy_read_timeout 300s` — на случай долгой стадии Critique.
-- Сервер шлёт keep-alive пинги (`:\n\n`) каждые 15 секунд.
-
-#### `Dockerfile`
-
-```dockerfile
-FROM python:3.14-slim
-WORKDIR /app
-RUN pip install poetry
-COPY pyproject.toml poetry.lock ./
-RUN poetry install --no-root --only main
-COPY . .
-CMD ["poetry", "run", "gunicorn", "-c", "gunicorn_conf.py", "src.main:app"]
-```
-
-#### `gunicorn_conf.py`
-
-```python
-import multiprocessing
-
-bind = "0.0.0.0:8000"
-workers = multiprocessing.cpu_count() * 2 + 1
-worker_class = "uvicorn.workers.UvicornWorker"
-timeout = 120          # увеличен из-за долгих LLM-запросов
-keepalive = 5
-accesslog = "-"
-```
-
-#### `.env.example`
-
-```env
-# dev | stage | prod
-ENV=dev
-
-# Для Docker Compose: DB__HOST=db
-# Для локальной разработки: DB__HOST=localhost
-DB__HOST=db
-DB__PORT=5432
-DB__USER=postgres
-DB__PASSWORD=postgres
-DB__NAME=lib_management
-
-# Опционально. Если не задано, echo=True в dev, echo=False в prod/stage.
-# DB__ECHO=true
-DB__POOL_SIZE=20
-DB__MAX_OVERFLOW=10
-DB__POOL_RECYCLE=1800
-
-# Планируется:
-# OPENAI_API_KEY=sk-...
-# ANTHROPIC_API_KEY=sk-ant-...
-# LLM__ANALYST_MODEL=gpt-4o
-# LLM__CRITIC_MODEL=claude-sonnet-4-20250514
-# LLM__EMBEDDING_MODEL=text-embedding-3-small
-# LLM__EMBEDDING_DIM=1536
-# LLM__MAX_ARCADE_ITERATIONS=3
-```
-
----
-
-### `src/core` — Ядро приложения
-
-#### `src/core/config.py`
-
-Использует `pydantic-settings` для типобезопасной загрузки конфигурации из `.env`:
-
-```python
-class DatabaseSettings(BaseModel):
-    host: str
-    port: int
-    user: str
-    password: SecretStr
-    name: str
-    echo: bool | None = None      # None → авто (True для dev, False для prod)
-    pool_size: int = 20
-    max_overflow: int = 10
-    pool_recycle: int = 1800
-
-    @computed_field
-    def url(self) -> str:
-        # postgresql+asyncpg://user:pass@host:port/dbname
-        ...
-
-class AppSettings(BaseSettings):
-    env: Literal["dev", "stage", "prod"] = "prod"
-    db: DatabaseSettings
-
-    @computed_field
-    def db_echo(self) -> bool:
-        """SQL echo: явное значение из DB__ECHO или автоматически True для dev."""
-        if self.db.echo is not None:
-            return self.db.echo
-        return self.env == "dev"
-
-    # Планируется:
-    # llm: LLMSettings
-    # openai_api_key: SecretStr
-    # anthropic_api_key: SecretStr
-```
-
-- Вложенная структура через `env_nested_delimiter="__"` — переменная `DB__HOST` маппится в `settings.db.host`.
-- `db_echo` — если `DB__ECHO` не задан в `.env`, SQL-логирование автоматически включается в dev и выключается в prod.
-
-#### `src/core/exceptions.py`
-
-Кастомные исключения, которые перехватываются через `@app.exception_handler`:
-
-```python
-class NotFoundError(Exception): ...
-class ConflictError(Exception): ...
-class DocumentParsingError(Exception): ...
-class LLMProviderError(Exception): ...
-```
-
-В `main.py` регистрируются обработчики, которые превращают их в корректные HTTP-ответы (404, 409, 422, 502).
-
-#### `src/core/logging.py`
-
-Конфигурация Loguru:
-
-```python
-from loguru import logger
-import sys
-
-def setup_logging(env: str) -> None:
-    logger.remove()
-    fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>"
-    logger.add(sys.stderr, format=fmt, level="DEBUG" if env == "dev" else "INFO")
-```
-
----
-
-### `src/db` — Слой базы данных
-
-#### `src/db/base_model.py`
-
-`DeclarativeBase` для всех SQLAlchemy-моделей с кастомным `__repr__`:
-
-```python
-class Base(DeclarativeBase):
-    __abstract__ = True
-    repr_cols_num = 3
-    repr_cols = tuple()
-```
-
-#### `src/db/base_dao.py`
-
-Универсальный generic-DAO (`BaseDAO[T]`), от которого наследуются все модульные DAO:
-
-| Метод | Описание |
-|---|---|
-| `find_one_or_none_by_id(id)` | Получение по PK |
-| `find_all(filters, expressions, limit, offset, order_by)` | Гибкий поиск с пагинацией |
-| `add(values, flush)` | Вставка одной записи |
-| `add_many(instances, return_objects)` | Bulk-вставка |
-| `update(filters, values)` | Обновление по фильтру |
-| `delete(filters)` | Удаление по фильтру |
-
-#### `src/db/session.py`
-
-```python
-engine = create_async_engine(settings.db.url, pool_size=..., max_overflow=...)
-async_session_maker = async_sessionmaker(bind=engine, expire_on_commit=False)
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with async_session_maker() as session:
-        yield session
-        await session.commit()
-```
-
----
-
-### `src/modules/users` — Пользователи
-
-Уже реализован. CRUD для управления профилями.
-
-#### `users/models.py`
-
-| Колонка | Тип | Описание |
-|---|---|---|
-| `id` | `int` PK | Автоинкремент |
-| `name` | `String(255)` | Имя пользователя |
-| `created_at` | `DateTime(tz)` | Время создания |
-| `updated_at` | `DateTime(tz)` | Время обновления |
-
-#### `users/schemas.py`
-
-- `UserCreate` — валидация имени (strip, min 1, max 255)
-- `UserUpdate` — partial update (все поля optional)
-- `UserFilter` — фильтрация по имени
-- `UserRead` — ответ клиенту (`from_attributes=True`)
-
-#### `users/dao.py`
-
-`UserDAO(BaseDAO[User])` — добавляет `find_filtered()` с case-insensitive partial match по имени.
-
-#### `users/services.py`
-
-`UserService` — тонкий слой бизнес-логики:
-- `get_all()`, `get_by_id()`, `create()`, `update()`, `delete()`
-- При `update()` вручную проставляет `updated_at`
-
-#### `users/routers.py`
-
-| Метод | Путь | Описание |
-|---|---|---|
-| `GET` | `/users/` | Список с фильтрацией и пагинацией |
-| `GET` | `/users/{id}` | Один пользователь |
-| `POST` | `/users/` | Создание (201) |
-| `PATCH` | `/users/{id}` | Частичное обновление |
-| `DELETE` | `/users/{id}` | Удаление (204) |
-
-#### `users/dependencies.py`
-
-FastAPI Depends: создаёт `UserService(UserDAO(session))`.
-
----
-
-### `src/modules/documents` — Документы
-
-Уже реализован. Загрузка небольших файлов, извлечение текста, разбиение на чанки.
-
-#### `documents/models.py`
-
-```python
-class Document(Base):
-    __tablename__ = "documents"
-
-    id: Mapped[int]              # PK
-    user_id: Mapped[int]         # FK → users.id
-    filename: Mapped[str]        # Оригинальное имя файла
-    content_type: Mapped[str]    # MIME-тип (application/pdf, text/plain, ...)
-    file_path: Mapped[str]       # Путь к сохранённому файлу на диске
-    text_content: Mapped[str]    # Извлечённый текст (полный)
-    status: Mapped[str]          # "pending" | "processing" | "ready" | "error"
-    created_at: Mapped[datetime]
-```
-
-#### `documents/schemas.py`
-
-```python
-class DocumentUpload(BaseModel):
-    user_id: int
-
-class DocumentRead(BaseModel):
-    id: int
-    filename: str
-    content_type: str
-    status: str
-    created_at: datetime
-```
-
-#### `documents/dao.py`
-
-`DocumentDAO(BaseDAO[Document])`:
-- `find_by_user(user_id)` — все документы пользователя
-- `update_status(doc_id, status)` — обновление статуса обработки
-
-#### `documents/services.py`
-
-`DocumentService` — оркестрация пайплайна загрузки:
+### DocumentService — оркестрация пайплайна загрузки:
 
 ```
 1. Сохранить файл на диск
@@ -597,34 +242,6 @@ class DocumentRead(BaseModel):
 
 Так как проект учебный и файлы маленькие, весь пайплайн выполняется синхронно в рамках запроса — без очередей задач.
 
-#### `documents/routers.py`
-
-| Метод | Путь | Описание |
-|---|---|---|
-| `POST` | `/documents/upload` | Загрузка файла (`UploadFile`) |
-| `GET` | `/documents/` | Список документов пользователя |
-| `GET` | `/documents/{id}` | Метаданные документа |
-| `DELETE` | `/documents/{id}` | Удаление документа и связанных данных |
-
-#### `documents/parser.py`
-
-Извлечение текста из файлов через **MarkItDown** или **PyMuPDF**:
-
-```python
-async def extract_text(file_path: str, content_type: str) -> str:
-    """
-    Определяет тип файла и извлекает текст:
-    - PDF  → MarkItDown / PyMuPDF (в asyncio.to_thread, т.к. sync)
-    - TXT  → простое чтение
-    - DOCX → MarkItDown (в asyncio.to_thread)
-
-    MarkItDown умеет конвертировать PDF, DOCX, PPTX и другие форматы
-    в Markdown, сохраняя структуру документа (заголовки, списки, таблицы).
-    PyMuPDF — альтернатива для PDF с надёжным извлечением текста.
-    """
-```
-
-Sync-библиотеки оборачиваются в `asyncio.to_thread()`.
 
 #### `documents/chunking.py`
 
@@ -831,194 +448,34 @@ async def emitter_node(state: AgentState) -> AgentState:
     """
 ```
 
-#### `agents/workflow.py`
-
-```python
-from langgraph.graph import StateGraph, END
-
-def build_workflow() -> StateGraph:
-    graph = StateGraph(AgentState)
-
-    # 6 узлов ARCADE
-    graph.add_node("ask", router_node)
-    graph.add_node("retrieve", researcher_node)
-    graph.add_node("analyze", analyst_node)
-    graph.add_node("critique", critic_node)
-    graph.add_node("decide", decision_node)
-    graph.add_node("emit", emitter_node)
-
-    # Прямой путь
-    graph.set_entry_point("ask")
-    graph.add_edge("ask", "retrieve")
-    graph.add_edge("retrieve", "analyze")
-    graph.add_edge("analyze", "critique")
-    graph.add_edge("critique", "decide")
-
-    # Условное ребро: retry или финал
-    graph.add_conditional_edges(
-        "decide",
-        should_continue,
-        {
-            "retry_retrieve": "retrieve",
-            "retry_analyze": "analyze",
-            "end": "emit",
-        },
-    )
-    graph.add_edge("emit", END)
-
-    return graph.compile()
-
-def should_continue(state: AgentState) -> str:
-    if state["is_approved"] or state["iteration"] >= state["max_iterations"]:
-        return "end"
-    if state.get("needs_more_context"):
-        return "retry_retrieve"
-    return "retry_analyze"
-```
-
----
-
-### `src/modules/chat` — Чат и SSE-стриминг
-
-#### `chat/models.py`
-
-```python
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
-
-    id: Mapped[int]              # PK
-    user_id: Mapped[int]         # FK → users.id
-    title: Mapped[str | None]    # Автозаголовок (по первому сообщению)
-    created_at: Mapped[datetime]
-    updated_at: Mapped[datetime]
-
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
-
-    id: Mapped[int]              # PK
-    session_id: Mapped[int]      # FK → chat_sessions.id
-    role: Mapped[str]            # "user" | "assistant" | "system"
-    content: Mapped[str]         # Текст сообщения
-    metadata_: Mapped[dict | None]  # JSON: итерации ARCADE, источники
-    created_at: Mapped[datetime]
-```
-
-#### `chat/schemas.py`
-
-```python
-class ChatRequest(BaseModel):
-    session_id: int | None = None   # None → создать новую сессию
-    user_id: int
-    message: str
-
-class ChatEvent(BaseModel):
-    """Формат SSE-событий"""
-    event: str    # "routing" | "retrieving" | "token" | "analyst_thinking" |
-                  # "critic_review" | "done" | "error"
-    data: str
-
-class SessionRead(BaseModel):
-    id: int
-    title: str | None
-    created_at: datetime
-    updated_at: datetime
-    message_count: int
-
-class MessageRead(BaseModel):
-    id: int
-    role: str
-    content: str
-    created_at: datetime
-```
-
-#### `chat/dao.py`
-
-`ChatDAO`:
-- `create_session(user_id)` — создать новую сессию
-- `add_message(session_id, role, content, metadata)` — сохранить сообщение
-- `get_sessions_by_user(user_id)` — история сессий
-- `get_messages_by_session(session_id)` — сообщения в сессии
-
-#### `chat/services.py`
-
-```python
-class ChatService:
-    async def stream_response(self, request: ChatRequest) -> AsyncGenerator[ChatEvent, None]:
-        """
-        1. Создать / получить сессию
-        2. Сохранить сообщение пользователя
-        3. Запустить ARCADE workflow (LangGraph)
-        4. По мере работы yield ChatEvent (SSE):
-           - {"event": "routing", "data": "Определяю тип запроса..."}
-           - {"event": "retrieving", "data": "Ищу в базе знаний..."}
-           - {"event": "analyst_thinking", "data": "Генерирую ответ..."}
-           - {"event": "token", "data": "Пётр"}
-           - {"event": "critic_review", "data": "Проверяю факты..."}
-           - {"event": "done", "data": ""}
-        5. Keep-alive пинги (:\n\n) каждые 15 сек на стадии Critique
-        6. Сохранить финальный ответ в БД
-        """
-```
-
-#### `chat/routers.py`
-
-```python
-from fastapi.responses import StreamingResponse
-
-router = APIRouter(prefix="/chat", tags=["chat"])
-
-@router.post("/stream")
-async def chat_stream(request: ChatRequest, service: ChatService = Depends(...)):
-    async def event_generator():
-        async for event in service.stream_response(request):
-            yield f"event: {event.event}\ndata: {event.data}\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # сигнал Nginx не буферизировать
-        },
-    )
-
-@router.get("/sessions", response_model=list[SessionRead])
-async def get_sessions(user_id: int, ...): ...
-
-@router.get("/sessions/{session_id}/messages", response_model=list[MessageRead])
-async def get_messages(session_id: int, ...): ...
-```
-
----
-
 ## API-эндпоинты
 
 ### Users
 
 | Метод | Путь | Описание | Статус |
 |---|---|---|---|
-| `GET` | `/users/` | Список пользователей | ✅ Готов |
-| `GET` | `/users/{id}` | Профиль пользователя | ✅ Готов |
-| `POST` | `/users/` | Создать пользователя | ✅ Готов |
-| `PATCH` | `/users/{id}` | Обновить профиль | ✅ Готов |
-| `DELETE` | `/users/{id}` | Удалить пользователя | ✅ Готов |
+| `GET` | `/users/` | Список пользователей |
+| `GET` | `/users/{id}` | Профиль пользователя |
+| `POST` | `/users/` | Создать пользователя |
+| `PATCH` | `/users/{id}` | Обновить профиль |
+| `DELETE` | `/users/{id}` | Удалить пользователя |
 
 ### Documents
 
 | Метод | Путь | Описание | Статус |
 |---|---|---|---|
-| `POST` | `/documents/upload` | Загрузить файл (PDF/TXT/DOCX) | ✅ Готов |
-| `GET` | `/documents/` | Список документов пользователя | ✅ Готов |
-| `GET` | `/documents/{id}` | Метаданные документа | ✅ Готов |
-| `DELETE` | `/documents/{id}` | Удалить документ | ✅ Готов |
+| `POST` | `/documents/upload` | Загрузить файл (PDF/TXT/DOCX) |
+| `GET` | `/documents/` | Список документов пользователя |
+| `GET` | `/documents/{id}` | Метаданные документа |
+| `DELETE` | `/documents/{id}` | Удалить документ |
 
 ### Chat
 
 | Метод | Путь | Описание | Статус |
 |---|---|---|---|
-| `POST` | `/chat/stream` | SSE-стриминг ответа (ARCADE) | ✅ Готов |
-| `GET` | `/chat/sessions` | Список сессий пользователя | ✅ Готов |
-| `GET` | `/chat/sessions/{id}/messages` | История сообщений | ✅ Готов |
+| `POST` | `/chat/stream` | SSE-стриминг ответа (ARCADE) |
+| `GET` | `/chat/sessions` | Список сессий пользователя |
+| `GET` | `/chat/sessions/{id}/messages` | История сообщений |
 
 ---
 

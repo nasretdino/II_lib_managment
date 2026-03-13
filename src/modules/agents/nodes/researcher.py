@@ -8,7 +8,8 @@ logger = get_logger(module="agents", node="retrieve")
 
 def _mode_for_query_type(query_type: QueryType) -> str:
     if query_type == "search":
-        return "local"
+        # mix combines graph and vector retrieval and works better for document Q&A.
+        return "mix"
     if query_type == "analytics":
         return "hybrid"
     return "global"

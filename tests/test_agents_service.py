@@ -29,7 +29,7 @@ async def test_agents_service_runs_full_arcade_cycle():
     result = await service.run(question="What is Python?")
 
     assert result.query_type == "search"
-    assert result.retrieval_mode in {"local", "hybrid", "global"}
+    assert result.retrieval_mode in {"mix", "hybrid", "global"}
     assert isinstance(result.final_answer, str)
     assert result.final_answer
     assert any(event.type == "emit_completed" for event in result.events)
